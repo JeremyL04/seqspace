@@ -1,5 +1,5 @@
 module Voronoi
-
+#=
 using LinearAlgebra
 
 import ChainRulesCore: rrule, NoTangent
@@ -186,5 +186,5 @@ function rrule(::typeof(volumes), x)
         return (NoTangent(), ∂x ./ Z)
     end
 end
-
+=#
 end
