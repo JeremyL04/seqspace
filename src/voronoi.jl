@@ -1,7 +1,6 @@
 module Voronoi
 
 using LinearAlgebra
-using DelaunayTriangulation
 
 import ChainRulesCore: rrule, NoTangent
 
@@ -32,6 +31,7 @@ const NB = 4
 Construct a voronoi tessellation from generating points `q`.
 Return _just_ vertices of construction.
 """
+
 function tessellation(q)
     # q = hcat(boundary, x)
     triangulation = triangulate(q)
