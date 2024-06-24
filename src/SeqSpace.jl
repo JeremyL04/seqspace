@@ -438,7 +438,7 @@ end
 Retrain model within `result` on `input` data for `epochs` more iterations.
 Returns a new `Result`.
 """
-function extendfit(result::Result, input, epochs)
+function extendfit(resu;lt::Result, input, epochs)
     loss = buildloss(result.model, input.D², result.param)
     train!(result.model, input.y.train, input.index.train, loss; 
         η   = result.param.η,
@@ -448,6 +448,10 @@ function extendfit(result::Result, input, epochs)
     )
 
     return result, input
+end
+
+function test_func()
+    print("This is a function")
 end
 
 end
