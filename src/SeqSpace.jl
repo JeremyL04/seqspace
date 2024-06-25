@@ -2,10 +2,11 @@ module SeqSpace
 
 using GZip
 using BSON: @save
-using LinearAlgebra: norm, svd, Diagonal
+using LinearAlgebra: norm, svd, Diagonal, dot
 using Statistics: quantile, std
 using Flux, Zygote
 using ProgressMeter
+using Roots: find_zero, rrule
 
 import BSON
 
@@ -25,6 +26,7 @@ using .PointCloud, .DataIO, .SoftRank, .ML
 export Result, HyperParams
 export linearprojection, fitmodel, extendfit
 export marshal, unmarshal
+export version_info
 
 # ------------------------------------------------------------------------
 # globals
@@ -118,7 +120,7 @@ Store the output of a trained autoencoder.
 """
 struct Result
     param :: HyperParams
-    loss  :: NamedTuple{(:train, :valid), Tuple{Array{Float64,1},Array{Float64,1}} }
+    loss  :: NamedTuple{(:train, :valid, :E_r, :E_x, :E_u, :History), Tuple{Array{Float64,1},Array{Float64,1},Array{Float64,1},Array{Float64,1},Array{Float64,1},Any} }
     model
 end
 
@@ -262,72 +264,79 @@ function cor(x, y)
 end
 
 """
-    buildloss(model, D², param, voronoi_uniformization=false)
+    buildloss(model, D², param)
 
 Return a loss function used to train a neural network `model` according to input hyperparameters `param`.
 `model` is a object with three fields, `pullback`, `pushforward`, and `identity`.
 `pullback` and `pushforward` refers to the encoder and decoder layers respectively, while the identity is the composition.
 `D²` is a matrix of pairwise distances that will be used as a quenched hyperparameter in the distance soft rank loss.
 """
-function buildloss(model, D², param; voronoi_uniformization=false)
-    # TODO(nnoll): condense this by making seperate functions. right now very copied pasted...
-    if voronoi_uniformization
-        return function(x, i::T, output::Bool) where T <: AbstractArray{Int,1}
-            z = model.pullback(x)
-            y = model.pushforward(z)
+function buildloss(model, D², param)
+    return function(x, i::T, output::Bool) where T <: AbstractArray{Int,1}
+        z = model.pullback(x)
+        y = model.pushforward(z)
 
-            # reconstruction loss
-            ϵᵣ = sum(sum((x.-y).^2, dims=2)) / sum(sum(x.^2,dims=2))
+        # reconstruction loss
+        ϵᵣ = sum(sum((x.-y).^2, dims=2)) / sum(sum(x.^2,dims=2))
 
-            # distance softranks
-            Dz² = param.g(z)
-            Dx² = D²[i,i]
+        # distance softranks
+        Dz² = param.g(z)
+        Dx² = D²[i,i]
 
-            dx, dz = PointCloud.upper_tri(Dx²), PointCloud.upper_tri(Dz²)
-            rx, rz = softrank(dx ./ mean(dx)), softrank(dz ./ mean(dz))
-            ϵₓ = 1 - cor(1 .- rx, 1 .- rz)
-            ϵᵤ = let
-                a₀ = 4 / length(z)
-                a = Voronoi.volumes(z)
+        dx, dz = PointCloud.upper_tri(Dx²), PointCloud.upper_tri(Dz²)
+        rx, rz = softrank(dx ./ mean(dx)), softrank(dz ./ mean(dz))
+        ϵₓ = 1 - cor(1 .- rx, 1 .- rz)
 
-                mean((a./a₀ .- 1).^2)
-            end
-
-            if output
-                println(stderr, "ϵᵣ=$(ϵᵣ), ϵₓ=$(ϵₓ), ϵᵤ=$(ϵᵤ)")
-            end
-
-            return ϵᵣ + param.γₓ*ϵₓ + param.γᵤ*ϵᵤ
+        ϵᵤ = let
+            N = size(z,2)
+            Nₛ = 10 # Number of slices
+            Θ = (0+0.001:π/(Nₛ):π-0.01)
+            proj = [[dot( point , [cos(θ),sin(θ)] ) for point ∈ eachcol(z)] for θ ∈ Θ]
+            Y = collect(0:1/(N-1):1)
+            InvCDFs = [[Radon.Square_InvCDFRadon(y,θ) for y ∈ Y] for θ ∈ Θ]
+            mean([mean( (InvCDFs[i] .- sort(proj[i])).^2 ) for i ∈ 1:length(Θ)].^(1/2))
         end
-    else
-        return function(x, i::T, output::Bool) where T <: AbstractArray{Int,1}
-            z = model.pullback(x)
-            y = model.pushforward(z)
 
-            # reconstruction loss
-            ϵᵣ = sum(sum((x.-y).^2, dims=2)) / sum(sum(x.^2,dims=2))
-
-            # distance softranks
-            Dz² = param.g(z)
-            Dx² = D²[i,i]
-
-            dx, dz = PointCloud.upper_tri(Dx²), PointCloud.upper_tri(Dz²)
-            rx, rz = softrank(dx ./ mean(dx)), softrank(dz ./ mean(dz))
-            ϵₓ = 1 - cor(1 .- rx, 1 .- rz)
-
-            ϵᵤ = mean(
-                let
-                    zₛ = sort(z[d,:])
-                    mean( ( (2*i/length(zₛ)-1) - s)^2 for (i,s) in enumerate(zₛ) )
-                end for d ∈ 1:size(z,1)
-            )
-
-            if output
-                println(stderr, "ϵᵣ=$(ϵᵣ), ϵₓ=$(ϵₓ), ϵᵤ=$(ϵᵤ)")
-            end
-
-            return ϵᵣ + param.γₓ*ϵₓ + param.γᵤ*ϵᵤ
+        if output
+            println(stderr, "ϵᵣ=$(ϵᵣ), ϵₓ=$(ϵₓ), ϵᵤ=$(ϵᵤ)")
         end
+
+        return ϵᵣ + param.γₓ*ϵₓ + param.γᵤ*ϵᵤ
+    end
+end
+
+function build_data_loss(model, D², param)
+    return function(x, i::T, output::Bool) where T <: AbstractArray{Int,1}
+        z = model.pullback(x)
+        y = model.pushforward(z)
+
+        # reconstruction loss
+        ϵᵣ = sum(sum((x.-y).^2, dims=2)) / sum(sum(x.^2,dims=2))
+
+        # distance softranks
+        Dz² = param.g(z)
+        Dx² = D²[i,i]
+
+        dx, dz = PointCloud.upper_tri(Dx²), PointCloud.upper_tri(Dz²)
+        rx, rz = softrank(dx ./ mean(dx)), softrank(dz ./ mean(dz))
+        ϵₓ = 1 - cor(1 .- rx, 1 .- rz)
+
+
+        ϵᵤ = let
+            N = size(z,2)
+            Nₛ = 10 # Number of slices
+            Θ = (0+0.001:π/(Nₛ):π-0.01)
+            proj = [[dot( point , [cos(θ),sin(θ)] ) for point ∈ eachcol(z)] for θ ∈ Θ]
+            Y = collect(0:1/(N-1):1)
+            InvCDFs = [[Radon.Square_InvCDFRadon(y,θ) for y ∈ Y] for θ ∈ Θ]
+            mean([mean( (InvCDFs[i] .- sort(proj[i])).^2 ) for i ∈ 1:length(Θ)].^(1/2))
+        end
+
+        if output
+            println(stderr, "ϵᵣ=$(ϵᵣ), ϵₓ=$(ϵₓ), ϵᵤ=$(ϵᵤ)")
+        end
+
+        return ϵᵣ,ϵₓ,ϵᵤ
     end
 end
 
@@ -376,8 +385,7 @@ function fitmodel(
     D²=nothing,
     chatty=true,
     interior_activation=celu,
-    exterior_activation=tanh_fast,
-    voronoi_uniformization=true,
+    exterior_activation=tanh_fast
 )
     D² = isnothing(D²) ? geodesics(data, param.k).^2 : D²
     if chatty
@@ -395,20 +403,34 @@ function fitmodel(
     nvalid = size(data,2) - ((size(data,2)÷param.B)-param.V)*param.B
     batch, index = validate(data, nvalid)
 
-    loss = buildloss(M, D², param, voronoi_uniformization=voronoi_uniformization)
+    loss = buildloss(M, D², param)
+    data_loss = build_data_loss(M, D², param)
     E    = (
         train = Float64[],
         valid = Float64[],
+        E_r = Float64[],
+        E_x = Float64[],
+        E_u = Float64[],
+        History = []
     )
 
-    progress = Progress(param.N; desc=">training model", output=stderr)
+    #History = Array{Float32}(undef, 2, size(data,2), param.N) 
+
+    progress = Progress(Int(round(param.N/10)); desc=">training model (1% ≈ $(Int(round(param.N/10))) Epochs)", output=stderr)
     log = (n) -> begin
         if (n-1) % param.δ == 0
             push!(E.train,loss(batch.train, index.train, chatty))
             push!(E.valid,loss(batch.valid, index.valid, chatty))
+            push!(E.E_r,data_loss(batch.train, index.train, chatty)[1])
+            push!(E.E_x,data_loss(batch.train, index.train, chatty)[2])
+            push!(E.E_u,data_loss(batch.train, index.train, chatty)[3])
         end
 
-        next!(progress)
+        if (n-1) % 10 == 0
+            next!(progress)
+        end
+
+        push!(E.History,M.pullback(data))
 
         nothing
     end
@@ -422,6 +444,9 @@ function fitmodel(
     )
     Flux.trainmode!(M.identity, false)
 
+    #Reset the progress bar for re-training
+    progress = Progress(Int(round(param.N/10)); desc=">training model (1% ≈ $(Int(round(param.N/10))) Epochs)", output=stderr)
+    
     return Result(param, E, M), (
         batch=batch,
         index=index,
@@ -438,9 +463,11 @@ end
 Retrain model within `result` on `input` data for `epochs` more iterations.
 Returns a new `Result`.
 """
-function extendfit(resu;lt::Result, input, epochs)
-    loss = buildloss(result.model, input.D², result.param)
-    train!(result.model, input.y.train, input.index.train, loss; 
+function extendfit(result::Result, input, new_params, epochs)
+    loss = buildloss(result.model, input.D², new_params)
+    data_loss = build_data_loss(result.model, input.D², new_params)
+
+    train!(result.model, input.batch.train, input.index.train, loss; 
         η   = result.param.η,
         B   = result.param.B,
         N   = epochs,
@@ -450,8 +477,8 @@ function extendfit(resu;lt::Result, input, epochs)
     return result, input
 end
 
-function test_func()
-    print("This is a function")
+function version_info()
+    return "6/25 Version 1"
 end
 
 end
