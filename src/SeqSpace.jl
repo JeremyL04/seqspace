@@ -13,7 +13,7 @@ import BSON
 include("io.jl")
 include("rank.jl")
 include("model.jl")
-include("voronoi.jl")
+include("radon.jl")
 include("pointcloud.jl")
 include("generate.jl")
 include("normalize.jl")
