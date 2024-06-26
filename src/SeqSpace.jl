@@ -120,7 +120,7 @@ Store the output of a trained autoencoder.
 """
 struct Result
     param :: HyperParams
-    loss  :: NamedTuple{(:train, :valid, :E_r, :E_x, :E_u, :History), Tuple{Array{Float64,1},Array{Float64,1},Array{Float64,1},Array{Float64,1},Array{Float64,1},Any} }
+    loss  :: NamedTuple{(:train, :valid,  :E_r, :E_x, :E_u, :History), Tuple{Array{Float64,1},Array{Float64,1},Array{Float64,1},Array{Float64,1},Array{Float64,1},Any} }
     model
 end
 
@@ -131,6 +131,10 @@ Serialize a trained autoencoder to binary format suitable for disk storage.
 Store parameters of model as contiguous array
 """
 function marshal(r::Result)
+    # activation functions TODO: should this be a hyperparameter?
+    σ_interior = r.model.pullback.layers[end].σ
+    σ_exterior = r.model.pullback.layers[1].σ
+    
     # trainable parameters
     ω₁ = r.model.pullback    |> cpu |> Flux.params |> collect
     ω₂ = r.model.pushforward |> cpu |> Flux.params |> collect
@@ -140,18 +144,20 @@ function marshal(r::Result)
     β₂ = [ (μ=layer.μ,σ²=layer.σ²) for layer in r.model.pushforward.layers if isa(layer,Flux.BatchNorm) ]
 
     return Result(r.param,r.loss,
-            (
-                pullback=(
-                    params=ω₁,
-                    batchs=β₁,
+                    (
+                        pullback=(
+                            params=ω₁,
+                            batchs=β₁,
+                        ),
+                        pushforward=(
+                            params=ω₂,
+                            batchs=β₂,
+                        ),
+                        size=size(r.model.pullback.layers[1].weight,2)
+                    )
                 ),
-                pushforward=(
-                    params=ω₂,
-                    batchs=β₂,
-                ),
-                size=size(r.model.pullback.layers[1].weight,2)
-            )
-    )
+                σ_interior,
+                σ_exterior
 end
 
 """
@@ -160,11 +166,14 @@ end
 Deserialize a trained autoencoder from binary format to semantic format.
 Represents model as a collection of functors.
 """
-function unmarshal(r)
+function unmarshal(R)
+    r = R[1] # This is a really ugly fix to this
     autoencoder = model(r.model.size, r.param.dₒ;
           Ws         = r.param.Ws,
           normalizes = r.param.BN,
-          dropouts   = r.param.DO
+          dropouts   = r.param.DO,
+          interior_activation = R[2],
+          exterior_activation = R[3]
     )
 
     Flux.loadparams!(autoencoder.pullback,    r.model.pullback.params)

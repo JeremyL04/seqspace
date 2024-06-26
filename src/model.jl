@@ -41,9 +41,9 @@ struct LayerIterator
     width     :: Array{Int}
     dropout   :: Set{Int}
     normalize :: Set{Int}
-    σᵢ        :: Function # activation on input layers
-    σₒ        :: Function # activation on output layers
-    σ         :: Function # activation on latent layers
+    σᵢ        :: Function # activation on input layers (first)
+    σₒ        :: Function # activation on output layers (last)
+    σ         :: Function # activation on latent layers (inside)
 end
 
 length(it::LayerIterator)  = length(it.width) + length(it.dropout) + length(it.normalize)
