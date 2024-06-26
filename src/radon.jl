@@ -1,7 +1,8 @@
 module Radon
 
 using LinearAlgebra
-
+using Statistics
+using Roots: find_zero, rrule
 
 #=
 TODO Lots of optimization to be done here. Add more arguments to the functions and have them return 
@@ -33,4 +34,6 @@ function ϵ_Square(Z)
     Y = collect(0:1/(N-1):1)
     InvCDFs = [[Square_InvCDFRadon(y,θ) for y ∈ Y] for θ ∈ Θ]
     return mean([mean( (InvCDFs[i] .- sort(proj[i])).^2 ) for i ∈ 1:length(Θ)].^(1/2)) # Notice this is W₂
+end
+
 end
