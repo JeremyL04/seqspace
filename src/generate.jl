@@ -68,6 +68,21 @@ function swissroll(N; z₀=10, R=1/20)
     return hcat(ϕ .* cos.(ϕ), ϕ .* sin.(ϕ), z)' .* R, hcat(ϕ, z)'
 end
 
+function swissroll_ratio(N; θ = 3π, λ = 1, R = 1)
+    z₀ = let 
+        θ₀ = 1.5π
+        θₜ = 1.5π + θ
+        a = 1/(θₜ)
+        s(ϕ) = 0.5*a*(ϕ*√( 1+ϕ^2 ) + log(ϕ+√( 1+ϕ^2 )))
+        s(θₜ) - s(θ₀)
+    end
+    z = (z₀/λ)*rand(Float64, N)
+    ϕ = 1.5π .+ θ .* rand(Float64, N)
+
+    return hcat(ϕ/(1.5π + θ) .* cos.(ϕ), ϕ/(1.5π + θ) .* sin.(ϕ), z)' .* R, hcat(ϕ, z)'
+end
+
+
 """
     torus(N; R=2, r=1)
 
