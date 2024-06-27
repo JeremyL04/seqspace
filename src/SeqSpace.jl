@@ -132,8 +132,8 @@ Store parameters of model as contiguous array
 """
 function marshal(r::Result)
     # activation functions TODO: should this be a hyperparameter?
-    σ_interior = r.model.pullback.layers[end].σ
-    σ_exterior = r.model.pullback.layers[1].σ
+    σ_interior = r.model.pullback.layers[3].σ
+    σ_exterior = r.model.pullback.layers[end].σ
     
     # trainable parameters
     ω₁ = r.model.pullback    |> cpu |> Flux.params |> collect
