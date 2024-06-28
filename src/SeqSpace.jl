@@ -120,7 +120,8 @@ Store the output of a trained autoencoder.
 """
 struct Result
     param :: HyperParams
-    loss  :: NamedTuple{(:train, :valid,  :E_r, :E_x, :E_u, :History), Tuple{Array{Float64,1},Array{Float64,1},Array{Float64,1},Array{Float64,1},Array{Float64,1},Any} }
+    loss  :: NamedTuple{(:train, :valid), Tuple{Array{Float64,1},Array{Float64,1}} }
+    info :: NamedTuple{(:𝕃ᵣ, :𝕃ₓ, :𝕃ᵤ, :history), Tuple{Array{Float64,1},Array{Float64,1},Array{Float64,1},Any}}
     model
 end
 
@@ -417,30 +418,33 @@ function fitmodel(
     E    = (
         train = Float64[],
         valid = Float64[],
-        E_r = Float64[],
-        E_x = Float64[],
-        E_u = Float64[],
-        History = []
     )
-
-    #History = Array{Float32}(undef, 2, size(data,2), param.N) 
+    Info = (
+        𝕃ᵣ = Float64[],
+        𝕃ₓ = Float64[],
+        𝕃ᵤ = Float64[],
+        history = [] #TODO figure out the data struct of history and add it here 
+    )
 
     progress = Progress(Int(round(param.N/10)); desc=">training model (1% ≈ $(Int(round(param.N/10))) Epochs)", output=stderr)
     log = (n) -> begin
         if (n-1) % param.δ == 0
-            push!(E.train,loss(batch.train, index.train, chatty))
-            push!(E.valid,loss(batch.valid, index.valid, chatty))
-            push!(E.E_r,data_loss(batch.train, index.train, chatty)[1])
-            push!(E.E_x,data_loss(batch.train, index.train, chatty)[2])
-            push!(E.E_u,data_loss(batch.train, index.train, chatty)[3])
+            push!(E.train, loss(batch.train, index.train, chatty))
+            push!(E.valid, loss(batch.valid, index.valid, chatty))
+            if chatty
+                push!(Info.𝕃ᵣ, data_loss(batch.train, index.train, chatty)[1])
+                push!(Info.𝕃ₓ, data_loss(batch.train, index.train, chatty)[2])
+                push!(Info.𝕃ᵤ, data_loss(batch.train, index.train, chatty)[3])
+            end
         end
 
         if (n-1) % 10 == 0
             next!(progress)
         end
-
-        push!(E.History,M.pullback(data))
-
+        
+        if chatty
+            push!(Info.history, M.pullback(data))
+        end
         nothing
     end
 
@@ -456,7 +460,7 @@ function fitmodel(
     #Reset the progress bar for re-training
     progress = Progress(Int(round(param.N/10)); desc=">training model (1% ≈ $(Int(round(param.N/10))) Epochs)", output=stderr)
     
-    return Result(param, E, M), (
+    return Result(param, E, Info, M), (
         batch=batch,
         index=index,
         D²=D²,

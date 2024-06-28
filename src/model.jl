@@ -109,7 +109,7 @@ Initialize an autoencoding neural network with input dimension `dᵢ` and latent
 `normalizes` and `dropouts` denote which layers are followed by batch normalization and dropout specifically.
 The decoder layer is given the mirror symmetric architecture.
 """
-function model(dᵢ, dₒ; Ws=Int[], normalizes=Int[], dropouts=Int[], interior_activation=elu, exterior_activation=σ₀)
+function model(dᵢ, dₒ; Ws=Int[], normalizes=Int[], dropouts=Int[], interior_activation=celu, exterior_activation=celu)
     # check for obvious errors here
     length(dropouts)   > 0 && length(Ws) < maximum(dropouts)   ≤ 0 && error("invalid dropout layer position")
     length(normalizes) > 0 && length(Ws) < maximum(normalizes) ≤ 0 && error("invalid normalization layer position")
@@ -118,7 +118,7 @@ function model(dᵢ, dₒ; Ws=Int[], normalizes=Int[], dropouts=Int[], interior_
                 [dᵢ; Ws; dₒ],
                 Set(dropouts),
                 Set(normalizes),
-                σ₀,
+                celu,
                 exterior_activation,
                 interior_activation,
              )
