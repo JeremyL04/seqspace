@@ -381,24 +381,24 @@ function linearprojection(x, d; Δ=1, Λ=nothing)
 end
 
 """
-    fitmodel(data, param; D²=nothing, chatty=true, interior_activation=elu, exterior_activation=tanh_fast)
+    fitmodel(data, param; D²=nothing, dev=true, interior_activation=elu, exterior_activation=tanh_fast)
 
 Train an autoencoder model, specified with `param` hyperparams, to fit `data`.
 `data` is assumed to be sized ``d \times N`` where ``d`` and ``N`` are dimensionality and cardinality respectively.
 If not nothing, `D²` is assumed to be a precomputed distance matrix of point cloud `data`.
-If `chatty` is true, function will print to `stdout`.
+If `dev` is true, function will print to `stdout` and values of compoents of the loss (ϵₓ,ϵᵣ,ϵᵤ) will be recorded.
 Returns a `Result` type.
 """
 function fitmodel(
     data,
     param;
     D²=nothing,
-    chatty=true,
+    dev=true,
     interior_activation=celu,
     exterior_activation=tanh_fast
 )
     D² = isnothing(D²) ? geodesics(data, param.k).^2 : D²
-    if chatty
+    if dev
         println(stderr, "done computing geodesics...")
     end
 
@@ -429,12 +429,12 @@ function fitmodel(
     progress = Progress(Int(round(param.N/10)); desc=">training model (1% ≈ $(Int(round(param.N/10))) Epochs)", output=stderr)
     log = (n) -> begin
         if (n-1) % param.δ == 0
-            push!(E.train, loss(batch.train, index.train, chatty))
-            push!(E.valid, loss(batch.valid, index.valid, chatty))
-            if chatty
-                push!(Info.𝕃ᵣ, data_loss(batch.train, index.train, chatty)[1])
-                push!(Info.𝕃ₓ, data_loss(batch.train, index.train, chatty)[2])
-                push!(Info.𝕃ᵤ, data_loss(batch.train, index.train, chatty)[3])
+            push!(E.train, loss(batch.train, index.train, dev))
+            push!(E.valid, loss(batch.valid, index.valid, dev))
+            if dev
+                push!(Info.𝕃ᵣ, data_loss(batch.train, index.train, dev)[1])
+                push!(Info.𝕃ₓ, data_loss(batch.train, index.train, dev)[2])
+                push!(Info.𝕃ᵤ, data_loss(batch.train, index.train, dev)[3])
             end
         end
 
@@ -442,7 +442,7 @@ function fitmodel(
             next!(progress)
         end
         
-        if chatty
+        if dev
             push!(Info.history, M.pullback(data))
         end
         nothing
