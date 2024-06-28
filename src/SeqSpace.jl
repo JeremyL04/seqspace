@@ -144,7 +144,7 @@ function marshal(r::Result)
     β₁ = [ (μ=layer.μ,σ²=layer.σ²) for layer in r.model.pullback.layers    if isa(layer,Flux.BatchNorm) ]
     β₂ = [ (μ=layer.μ,σ²=layer.σ²) for layer in r.model.pushforward.layers if isa(layer,Flux.BatchNorm) ]
 
-    return Result(r.param,r.loss,r.info,
+    return Result(r.param,r.loss,
                     (
                         pullback=(
                             params=ω₁,
@@ -491,7 +491,7 @@ function extendfit(result::Result, input, new_params, epochs)
 end
 
 function version_info()
-    return "6/28 Version 1"
+    return "6/25 Version 1"
 end
 
 end
