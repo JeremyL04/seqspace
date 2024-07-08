@@ -131,11 +131,9 @@ end
 Serialize a trained autoencoder to binary format suitable for disk storage.
 Store parameters of model as contiguous array
 """
-function marshal(r::Result)
-    # activation functions TODO: should this be a hyperparameter?
-    σ_interior = r.model.pullback.layers[3].σ
-    σ_exterior = r.model.pullback.layers[end].σ
-    
+function marshal(TrainingOutput::Tuple{Result,Any}) 
+    r = TrainingOutput[1]
+    output = TrainingOutput[2]
     # trainable parameters
     ω₁ = r.model.pullback    |> cpu |> Flux.params |> collect
     ω₂ = r.model.pushforward |> cpu |> Flux.params |> collect
@@ -157,8 +155,14 @@ function marshal(r::Result)
                         size=size(r.model.pullback.layers[1].weight,2)
                     )
                 ),
-                σ_interior,
-                σ_exterior
+                (
+                batch=output.batch,
+                index=output.index,
+                D²=output.D²,
+                log=output.log,
+                interior_activation=output.interior_activation,
+                exterior_activation=output.exterior_activation
+                )
 end
 
 """
@@ -167,14 +171,15 @@ end
 Deserialize a trained autoencoder from binary format to semantic format.
 Represents model as a collection of functors.
 """
-function unmarshal(R)
-    r = R[1] # This is a really ugly fix to this
+function unmarshal(MarshaledModel::Tuple{Result,Any})
+    r = MarshaledModel[1]
+    output = MarshaledModel[2]
     autoencoder = model(r.model.size, r.param.dₒ;
           Ws         = r.param.Ws,
           normalizes = r.param.BN,
           dropouts   = r.param.DO,
-          interior_activation = R[2],
-          exterior_activation = R[3]
+          interior_activation = output.interior_activation,
+          exterior_activation = output.exterior_activation
     )
 
     Flux.loadparams!(autoencoder.pullback,    r.model.pullback.params)
@@ -214,7 +219,14 @@ function unmarshal(R)
         γᵤ = r.param.γᵤ,
     )
 
-    return Result(param, r.loss, r.info, autoencoder)
+    return Result(param, r.loss, r.info, autoencoder),(
+        batch=output.batch,
+        index=output.index,
+        D²=output.D²,
+        log=output.log,
+        interior_activation=output.interior_activation,
+        exterior_activation=output.exterior_activation
+    )
 end
 
 # ------------------------------------------------------------------------
@@ -491,7 +503,7 @@ function extendfit(result::Result, input, new_params, epochs)
 end
 
 function version_info()
-    return "6/28 Version 1"
+    return "7/8 Version 1" # This is to test if Revise.jl is working
 end
 
 end
