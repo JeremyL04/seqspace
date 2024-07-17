@@ -311,16 +311,13 @@ function buildloss(model, D², param)
 
         ϵᵤ = let
             N = size(z,2)
-            Nₛ = 10 # Number of slices
-            Θ = (0+0.001:π/(Nₛ):π-0.01)
+           #Nₛ = 20 # Number of slices
+            #Θ = (0+0.001:π/(Nₛ):π-0.01)
+            Θ = [0, π/4, π/2, 3π/4] .- 0.001
             proj = [[dot( point , [cos(θ),sin(θ)] ) for point ∈ eachcol(z)] for θ ∈ Θ]
             Y = collect(0:1/(N-1):1)
             InvCDFs = [[Radon.Square_InvCDFRadon(y,θ) for y ∈ Y] for θ ∈ Θ]
-            mean([mean( (InvCDFs[i] .- sort(proj[i])).^2 ) for i ∈ 1:length(Θ)].^(1/2))
-        end
-
-        if output
-            println(stderr, "ϵᵣ=$(ϵᵣ), ϵₓ=$(ϵₓ), ϵᵤ=$(ϵᵤ)")
+            mean([mean( (InvCDFs[i] .- sort(proj[i])).^2 ) for i ∈ 1:length(Θ)])
         end
 
         return ϵᵣ + param.γₓ*ϵₓ + param.γᵤ*ϵᵤ
@@ -346,16 +343,13 @@ function build_data_loss(model, D², param)
 
         ϵᵤ = let
             N = size(z,2)
-            Nₛ = 10 # Number of slices
-            Θ = (0+0.001:π/(Nₛ):π-0.01)
+            #Nₛ = 20 # Number of slices
+            #Θ = (0+0.001:π/(Nₛ):π+0.001)
+            Θ = [0, π/4, π/2, 3π/4] .- 0.001
             proj = [[dot( point , [cos(θ),sin(θ)] ) for point ∈ eachcol(z)] for θ ∈ Θ]
             Y = collect(0:1/(N-1):1)
             InvCDFs = [[Radon.Square_InvCDFRadon(y,θ) for y ∈ Y] for θ ∈ Θ]
-            mean([mean( (InvCDFs[i] .- sort(proj[i])).^2 ) for i ∈ 1:length(Θ)].^(1/2))
-        end
-
-        if output
-            println(stderr, "ϵᵣ=$(ϵᵣ), ϵₓ=$(ϵₓ), ϵᵤ=$(ϵᵤ)")
+            mean([mean( (InvCDFs[i] .- sort(proj[i])).^2 ) for i ∈ 1:length(Θ)])
         end
 
         return ϵᵣ,ϵₓ,ϵᵤ
@@ -438,7 +432,7 @@ function fitmodel(
         history = [] #TODO figure out the data struct of history and add it here 
     )
 
-    progress = Progress(Int(round(param.N/10)); desc=">training model (1% ≈ $(Int(round(param.N/10))) Epochs)", output=stderr)
+    progress = Progress(Int(round(param.N/10)); desc=">training model", output=stderr)
     log = (n) -> begin
         if (n-1) % param.δ == 0
             push!(E.train, loss(batch.train, index.train, dev))
@@ -488,22 +482,47 @@ end
 Retrain model within `result` on `input` data for `epochs` more iterations.
 Returns a new `Result`.
 """
-function extendfit(result::Result, input, new_params, epochs)
+function extendfit(result::Result, input, new_params, dev, data)
     loss = buildloss(result.model, input.D², new_params)
     data_loss = build_data_loss(result.model, input.D², new_params)
 
+    progress = Progress(Int(round(new_params.N/10)); desc=">training model", output=stderr)
+    log = (n) -> begin
+        if (n-1) % new_params.δ == 0
+            push!(result.loss.train, loss(input.batch.train, input.index.train, false))
+            push!(result.loss.valid, loss(input.batch.valid, input.index.valid, false))
+            if dev
+                push!(result.info.𝕃ᵣ, data_loss(input.batch.train, input.index.train, false)[1])
+                push!(result.info.𝕃ₓ, data_loss(input.batch.train, input.index.train, false)[2])
+                push!(result.info.𝕃ᵤ, data_loss(input.batch.train, input.index.train, false)[3])
+            end
+        end
+
+        if (n-1) % 10 == 0
+            next!(progress)
+        end
+        
+        if dev
+            push!(result.info.history, result.model.pullback(data))
+        end
+        nothing
+    end
+
+    Flux.trainmode!(result.model.identity, true)
     train!(result.model, input.batch.train, input.index.train, loss; 
         η   = result.param.η,
         B   = result.param.B,
-        N   = epochs,
-        log = input.log
+        N   = new_params.N,
+        log = log
     )
+    Flux.trainmode!(result.model.identity, false)
 
-    return result, input
+
+    return Result(new_params, result.loss, result.info, result.model), input
 end
 
 function version_info()
-    return "7/8 Version 1" # This is to test if Revise.jl is working
+    return "7/16 Version 1" # This is to test if Revise.jl is working
 end
 
 end

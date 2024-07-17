@@ -224,7 +224,7 @@ Optional parameters include:
 """
 function train!(model, data, index, loss; B=64, η=1e-3, N=100, log=noop)
     Θ   = Flux.params(model.identity)
-    opt = ADAM(η)
+    opt = NADAM(η)
 
     for n ∈ 1:N
         X, I = batch(data, B)
