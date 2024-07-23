@@ -2,7 +2,7 @@ module SeqSpace
 
 using GZip
 using BSON: @save
-using LinearAlgebra: norm, svd, Diagonal, dot
+using LinearAlgebra: norm, svd, Diagonal, dot, eigvals
 using Statistics: quantile, std
 using Flux, Zygote
 using ProgressMeter
@@ -309,18 +309,28 @@ function buildloss(model, D², param)
         rx, rz = softrank(dx ./ mean(dx)), softrank(dz ./ mean(dz))
         ϵₓ = 1 - cor(1 .- rx, 1 .- rz)
 
-        ϵᵤ = let
+        ϵᵤ2 = let
             N = size(z,2)
-           #Nₛ = 20 # Number of slices
-            #Θ = (0+0.001:π/(Nₛ):π-0.01)
+            w = collect(-1:2/(N-1):1)
+            ϵ = 0.1
+            W = 10*(σ.(-(w.+1)/ϵ) + σ.((w.-1)/ϵ))
             Θ = [0, π/4, π/2, 3π/4] .- 0.001
             proj = [[dot( point , [cos(θ),sin(θ)] ) for point ∈ eachcol(z)] for θ ∈ Θ]
             Y = collect(0:1/(N-1):1)
             InvCDFs = [[Radon.Square_InvCDFRadon(y,θ) for y ∈ Y] for θ ∈ Θ]
-            mean([mean( (InvCDFs[i] .- sort(proj[i])).^2 ) for i ∈ 1:length(Θ)])
+            mean(mean([W .* (InvCDFs[i] - sort(proj[i])).^2 for i ∈ 1:length(Θ)]))
+        end
+        
+        ϵᵤ = let
+            centered_data = z .- sum(z)/length(z)
+            covariance_matrix = centered_data * centered_data' / (size(centered_data, 2) - 1)
+            eigenvalues = eigvals(covariance_matrix)
+            total_variance = sum(eigenvalues)
+            relative_importance = eigenvalues / total_variance
+            (relative_importance[1]/relative_importance[2] - 1)^2
         end
 
-        return ϵᵣ + param.γₓ*ϵₓ + param.γᵤ*ϵᵤ
+        return ϵᵣ + param.γₓ*ϵₓ + param.γᵤ*(ϵᵤ+ϵᵤ2)
     end
 end
 
@@ -340,19 +350,28 @@ function build_data_loss(model, D², param)
         rx, rz = softrank(dx ./ mean(dx)), softrank(dz ./ mean(dz))
         ϵₓ = 1 - cor(1 .- rx, 1 .- rz)
 
-
-        ϵᵤ = let
+        ϵᵤ2 = let
             N = size(z,2)
-            #Nₛ = 20 # Number of slices
-            #Θ = (0+0.001:π/(Nₛ):π+0.001)
+            w = collect(-1:2/(N-1):1)
+            ϵ = 0.1
+            W = 10*(σ.(-(w.+1)/ϵ) + σ.((w.-1)/ϵ))
             Θ = [0, π/4, π/2, 3π/4] .- 0.001
             proj = [[dot( point , [cos(θ),sin(θ)] ) for point ∈ eachcol(z)] for θ ∈ Θ]
             Y = collect(0:1/(N-1):1)
             InvCDFs = [[Radon.Square_InvCDFRadon(y,θ) for y ∈ Y] for θ ∈ Θ]
-            mean([mean( (InvCDFs[i] .- sort(proj[i])).^2 ) for i ∈ 1:length(Θ)])
+            mean(mean([W .* (InvCDFs[i] - sort(proj[i])).^2 for i ∈ 1:length(Θ)]))
+        end
+        
+        ϵᵤ = let
+            centered_data = z .- sum(z)/length(z)
+            covariance_matrix = centered_data * centered_data' / (size(centered_data, 2) - 1)
+            eigenvalues = eigvals(covariance_matrix)
+            total_variance = sum(eigenvalues)
+            relative_importance = eigenvalues / total_variance
+            (relative_importance[1]/relative_importance[2] - 1)^2
         end
 
-        return ϵᵣ,ϵₓ,ϵᵤ
+        return ϵᵣ,ϵₓ,ϵᵤ+ϵᵤ2
     end
 end
 
