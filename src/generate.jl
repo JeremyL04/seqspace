@@ -69,7 +69,7 @@ function swissroll(N; z₀=10, R=1/20)
 end
 
 function swissroll_ratio(N; θ = 3π, λ = 1, R = 1)
-    z₀ = let 
+    z₀ = let
         θ₀ = 1.5π
         θₜ = 1.5π + θ
         a = 1/(θₜ)

@@ -16,7 +16,7 @@ include("distance.jl")
 using .Distances
 
 export embed, upper_tri
-export neighborhood, geodesics, mds, isomap, scaling
+export neighborhood, geodesics, mds, isomap, scaling, local_connectors
 
 # ------------------------------------------------------------------------
 # globals
@@ -118,6 +118,23 @@ length(G :: Graph) = length(G.verts)
 # operations
 
 """
+    neighborhood(x, k :: T; D=missing, accept=(d)->true) where T <: Vector{Int}
+
+Constructs a neighborhood graph of the `k` nearest neighbor for each point of cloud `x`.
+If `D` is given, it is assumed to be a dense matrix of pairwise distances.
+"""
+function neighborhood(x, k :: T; D=missing, accept=(d)->true) where T <: Vector{Int64}
+    D = ismissing(D) ? euclidean(x) : D
+    G = Graph([Vertex(x[:,i]) for i ∈ 1:size(x,2)])
+    for i ∈ 1:size(D,1)
+        neighbor = sortperm(D[i,:])[2:end]
+        append!(G.edges, [Edge((i,j), D[i,j]) for j ∈ neighbor[1:k[i]] if accept(D[i,j])])
+    end
+
+    return G
+end
+
+"""
     neighborhood(x, k :: T; D=missing, accept=(d)->true) where T <: Integer
 
 Constructs a neighborhood graph of the `k` nearest neighbor for each point of cloud `x`.
@@ -152,6 +169,66 @@ function neighborhood(x, k :: T; D=missing, accept=(d)->true) where T <: Abstrac
 end
 
 """
+    avg_nbhd_distance(x, k :: T) where T <: Integer
+
+Computes the average neighborhood distance for each point in the point cloud `x` using the `k` nearest neighbors.
+"""
+function avg_nbhd_distance(x, k :: T) where T <: Integer
+    N = size(x,2)
+    edges = neighborhood(x, k).edges
+    verts = [edge.verts[1] for edge in edges]
+    distances = [edge.distance for edge in edges]
+    NBHD_sizes = Array{Float64}(undef, N)
+    for i in eachindex(x[2, :])
+        indices = findall(verts .== i)
+        NBHD_sizes[i] = sum(distances[indices])
+    end
+    return NBHD_sizes/maximum(NBHD_sizes)
+end
+
+"""
+WIP: 
+    local_connectors(NBHD_sizes :: Vector{T}, kₒ) where T <: AbstractFloat
+
+Returns the number of connectors for each point in the point cloud `x` based on the average neighborhood distance.
+"""
+
+
+function local_connectors(Ξ, kₒ)
+    # This is messy, but it works for now
+    if typeof(Ξ) <: Vector
+        NBHD_sizes = Ξ
+    elseif typeof(Ξ) <: Matrix
+        NBHD_sizes = avg_nbhd_distance(Ξ, kₒ)
+    else
+        error("Ξ must be a vector or matrix")
+    end
+
+
+    κ = Array{Int}(undef, length(NBHD_sizes))
+    μ = mean(NBHD_sizes)
+    σ = std(NBHD_sizes)
+    limits = [μ - 2σ, μ - σ, μ, μ + σ, μ + 2σ]
+    for i in eachindex(NBHD_sizes)
+        if NBHD_sizes[i] < limits[1]
+            κ[i] = kₒ - 2
+        elseif NBHD_sizes[i] < limits[2]
+            κ[i] = kₒ - 1
+        elseif NBHD_sizes[i] < limits[3]
+            κ[i] = kₒ
+        elseif NBHD_sizes[i] < limits[4]
+            κ[i] = kₒ 
+        elseif NBHD_sizes[i] < limits[5]
+            κ[i] = kₒ
+        else
+            κ[i] = kₒ
+        end
+    end
+    return κ
+end
+
+
+"""
     adjacency_list(G :: Graph)
 
 Return the flattened adjacency list for graph `G`.
@@ -160,8 +237,12 @@ function adjacency_list(G :: Graph)
     adj = [ Tuple{Int, Float64}[] for v ∈ 1:length(G.verts) ]
     for e ∈ G.edges
         v₁, v₂ = e.verts
-        push!(adj[v₁], (v₂, e.distance))
-        push!(adj[v₂], (v₁, e.distance))
+        if (v₂,e.distance) ∉ adj[v₁]
+            push!(adj[v₁], (v₂, e.distance))
+        end
+        if (v₁,e.distance) ∉ adj[v₂]
+            push!(adj[v₂], (v₁, e.distance))
+        end
     end
 
     return adj

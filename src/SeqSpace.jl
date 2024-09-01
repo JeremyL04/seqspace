@@ -20,8 +20,9 @@ include("normalize.jl")
 include("manifold.jl")
 include("infer.jl")
 include("scrna.jl")
+include("voronoi.jl")
 
-using .PointCloud, .DataIO, .SoftRank, .ML
+using .PointCloud, .DataIO, .SoftRank, .ML, .Voronoi
 
 export Result, HyperParams
 export linearprojection, fitmodel, extendfit
@@ -285,6 +286,12 @@ function cor(x, y)
     return (mean(x.*y) .- μ.x.*μ.y) / sqrt(var.x*var.y)
 end
 
+function tanh_weight(x; ϵ = 5)
+    return x # Future me will regret this
+    #return tanh_fast(ϵ*x)/tanh_fast(ϵ)
+end
+
+
 """
     buildloss(model, D², param)
 
@@ -293,7 +300,7 @@ Return a loss function used to train a neural network `model` according to input
 `pullback` and `pushforward` refers to the encoder and decoder layers respectively, while the identity is the composition.
 `D²` is a matrix of pairwise distances that will be used as a quenched hyperparameter in the distance soft rank loss.
 """
-function buildloss(model, D², param)
+function buildloss(model, D², param; data_mode)
     return function(x, i::T, output::Bool) where T <: AbstractArray{Int,1}
         z = model.pullback(x)
         y = model.pushforward(z)
@@ -305,81 +312,46 @@ function buildloss(model, D², param)
         Dz² = param.g(z)
         Dx² = D²[i,i]
 
-        dx, dz = PointCloud.upper_tri(Dx²), PointCloud.upper_tri(Dz²)
-        rx, rz = softrank(dx ./ mean(dx)), softrank(dz ./ mean(dz))
-        ϵₓ = 1 - cor(1 .- rx, 1 .- rz)
-
-        # ϵᵤ2 = let
-        #     N = size(z,2)
-        #     w = collect(-1:2/(N-1):1)
-        #     ϵ = 0.1
-        #     W = 10*(σ.(-(w.+1)/ϵ) + σ.((w.-1)/ϵ))
-        #     Θ = [0, π/4, π/2, π/4] .- 0.001
-        #     proj = [[dot( point , [cos(θ),sin(θ)] ) for point ∈ eachcol(z)] for θ ∈ Θ]
-        #     Y = collect(0:1/(N-1):1)
-        #     InvCDFs = [[Radon.Square_InvCDFRadon(y,θ) for y ∈ Y] for θ ∈ Θ]
-        #     mean(mean([W .* (InvCDFs[i] - sort(proj[i])).^2 for i ∈ 1:length(Θ)]))
-        # end
+        if param.γₓ == 0
+            ϵₓ = 0
+        else
+            ϵₓ = 1 - mean([
+                cor(
+                    tanh_weight.(softrank(cx ./ mean(cx))),
+                    tanh_weight.(softrank(cz ./ mean(cz)))
+                )
+                for (cx,cz) in zip(eachcol(Dx²),eachcol(Dz²))
+            ])
+        end
         
-        # ϵᵤ = let
-        #     centered_data = z .- sum(z)/length(z)
-        #     covariance_matrix = centered_data * centered_data' / (size(centered_data, 2) - 1)
-        #     eigenvalues = eigvals(covariance_matrix)
-        #     total_variance = sum(eigenvalues)
-        #     relative_importance = eigenvalues / total_variance
-        #     (relative_importance[1]/relative_importance[2] - 1)^2
-        # end
-
-
-        ϵᵤ = 0
-        ϵᵤ2 = 0
-        return ϵᵣ + param.γₓ*ϵₓ + param.γᵤ*(ϵᵤ+ϵᵤ2)
+        if param.γᵤ == 0
+            ϵᵤ = 0
+        else 
+            # ϵᵤ = let
+            #     Θ = [0, π/4, π/2, 3π/4] .- 0.001
+            #     Nₛ = length(Θ)
+            #     N = size(z,2)
+            #     #L = [abs(cos(Θ[i])) + abs(sin(Θ[i])) for i ∈ 1:Nₛ]
+            #     #w = [collect(-L[i]:2L[i]/(N-1):L[i]) for i in 1:Nₛ]
+            #     #ϵ = 0.1
+            #     #W = [10*(σ.(-(w[i].+L[i])/ϵ) + σ.((w[i].-L[i])/ϵ)) .+ 1 for i ∈ 1:Nₛ]
+            #     proj = [[dot( point , [cos(θ),sin(θ)] ) for point ∈ eachcol(z)] for θ ∈ Θ]
+            #     Y = collect(0:1/(N-1):1)
+            #     InvCDFs = [[Radon.Square_InvCDFRadon(y,θ) for y ∈ Y] for θ ∈ Θ]
+            #     mean(mean([ (InvCDFs[i] - sort(proj[i])).^2 for i ∈ 1:Nₛ]))
+            # end
+            
+            ϵᵤ = std(Voronoi.areas(z))
+        end
+    
+        if data_mode == true
+            return ϵᵣ,ϵₓ,ϵᵤ
+        else
+            return ϵᵣ + param.γₓ*ϵₓ + param.γᵤ*(ϵᵤ)
+        end
     end
 end
 
-function build_data_loss(model, D², param)
-    return function(x, i::T, output::Bool) where T <: AbstractArray{Int,1}
-        z = model.pullback(x)
-        y = model.pushforward(z)
-
-        # reconstruction loss
-        ϵᵣ = sum(sum((x.-y).^2, dims=2)) / sum(sum(x.^2,dims=2))
-
-        # distance softranks
-        Dz² = param.g(z)
-        Dx² = D²[i,i]
-
-        dx, dz = PointCloud.upper_tri(Dx²), PointCloud.upper_tri(Dz²)
-        rx, rz = softrank(dx ./ mean(dx)), softrank(dz ./ mean(dz))
-        ϵₓ = 1 - cor(1 .- rx, 1 .- rz)
-
-        # ϵᵤ2 = let
-        #     N = size(z,2)
-        #     w = collect(-1:2/(N-1):1)
-        #     ϵ = 0.1
-        #     W = 10*(σ.(-(w.+1)/ϵ) + σ.((w.-1)/ϵ))
-        #     Θ = [0, π/4, π/2, π/4] .- 0.001
-        #     proj = [[dot( point , [cos(θ),sin(θ)] ) for point ∈ eachcol(z)] for θ ∈ Θ]
-        #     Y = collect(0:1/(N-1):1)
-        #     InvCDFs = [[Radon.Square_InvCDFRadon(y,θ) for y ∈ Y] for θ ∈ Θ]
-        #     mean(mean([W .* (InvCDFs[i] - sort(proj[i])).^2 for i ∈ 1:length(Θ)]))
-        # end
-        
-        # ϵᵤ = let
-        #     centered_data = z .- sum(z)/length(z)
-        #     covariance_matrix = centered_data * centered_data' / (size(centered_data, 2) - 1)
-        #     eigenvalues = eigvals(covariance_matrix)
-        #     total_variance = sum(eigenvalues)
-        #     relative_importance = eigenvalues / total_variance
-        #     (relative_importance[1]/relative_importance[2] - 1)^2
-        # end
-
-
-        ϵᵤ = 0
-        ϵᵤ2 = 0
-        return ϵᵣ,ϵₓ,ϵᵤ+ϵᵤ2
-    end
-end
 
 # ------------------------------------------------------------------------
 # main functions
@@ -444,8 +416,9 @@ function fitmodel(
     nvalid = size(data,2) - ((size(data,2)÷param.B)-param.V)*param.B
     batch, index = validate(data, nvalid)
 
-    loss = buildloss(M, D², param)
-    data_loss = build_data_loss(M, D², param)
+    loss = buildloss(M, D², param, data_mode = false)
+    data_loss = buildloss(M, D², param, data_mode = true)
+
     E    = (
         train = Float64[],
         valid = Float64[],
@@ -507,9 +480,9 @@ end
 Retrain model within `result` on `input` data for `epochs` more iterations.
 Returns a new `Result`.
 """
-function extendfit(result::Result, input, new_params, dev, data)
-    loss = buildloss(result.model, input.D², new_params)
-    data_loss = build_data_loss(result.model, input.D², new_params)
+function extendfit(result::Result, input, new_params, D², dev, data)
+    loss = buildloss(M, D², param, data_mode = false)
+    data_loss = buildloss(M, D², param, data_mode = true)
 
     progress = Progress(Int(round(new_params.N/10)); desc=">training model", output=stderr)
     log = (n) -> begin
@@ -547,7 +520,7 @@ function extendfit(result::Result, input, new_params, dev, data)
 end
 
 function version_info()
-    return "7/24 Version 2" # This is to test if Revise.jl is working
+    return "8/16 Version 1" # This is to test if Revise.jl is working
 end
 
 end
