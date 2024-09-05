@@ -19,6 +19,17 @@ export model, train!, validate, preprocess, update_dimension
 
 # ------------------------------------------------------------------------
 # types
+# Multi Activation Function Layers
+
+struct CustomActivationLayer
+    linear::Dense
+    activations::Vector{Function}
+end
+
+function (m::CustomActivationLayer)(x)
+    z = m.linear(x)
+    collect(hcat([m.activations[i].(z[i, :]) for i in axes(z,1)]...)')
+end
 
 # Iterator
 """
@@ -42,8 +53,8 @@ struct LayerIterator
     dropout   :: Set{Int}
     normalize :: Set{Int}
     σᵢ        :: Function # activation on input layers (first)
-    σₒ        :: Function # activation on output layers (last)
-    σ         :: Function # activation on latent layers (inside)
+    σₒ        :: Union{Function, Vector{<:Function}} # activation on output layers (last / latent space)
+    σ         :: Function # activation on interoir layers
 end
 
 length(it::LayerIterator)  = length(it.width) + length(it.dropout) + length(it.normalize)
@@ -51,7 +62,7 @@ reverse(it::LayerIterator) = LayerIterator(
                                 reverse(it.width),
                                 Set(length(it.width) - i - 1 for i in it.dropout),
                                 Set(length(it.width) - i - 1 for i in it.normalize),
-                                it.σᵢ,
+                                it.σ,
                                 it.σᵢ, # intentional -> want to make output = input
                                 it.σ,
                              )
@@ -59,7 +70,7 @@ reverse(it::LayerIterator) = LayerIterator(
 function iterate(it::LayerIterator)
     w₁ = it.width[1]
     w₂ = it.width[2]
-    f  = Dense(w₁, w₂, it.σᵢ)
+    isa(it.σᵢ, Vector{<:Function}) ? f = CustomActivationLayer(Dense(w₁, w₂),it.σᵢ) : f = Dense(w₁, w₂, it.σᵢ)
 
     return f, (
         index     = 2,
@@ -86,7 +97,11 @@ function iterate(it::LayerIterator, state)
                 w₂ = it.width[state.index+1]
 
                 i  = state.index+1
-                f  = Dense(w₁, w₂, i == length(it.width) ? it.σₒ : it.σ)
+                    if i == length(it.width)
+                        isa(it.σₒ, Vector{<:Function}) ? f = CustomActivationLayer(Dense(w₁, w₂),it.σₒ) : f = Dense(w₁, w₂, it.σₒ)
+                    else
+                        f  = Dense(w₁, w₂, it.σ)
+                    end
 
                 f, (
                      index     = i,
@@ -109,16 +124,17 @@ Initialize an autoencoding neural network with input dimension `dᵢ` and latent
 `normalizes` and `dropouts` denote which layers are followed by batch normalization and dropout specifically.
 The decoder layer is given the mirror symmetric architecture.
 """
-function model(dᵢ, dₒ; Ws=Int[], normalizes=Int[], dropouts=Int[], interior_activation=celu, exterior_activation=celu)
+function model(dᵢ, dₒ; Ws=Int[], normalizes=Int[], dropouts=Int[], interior_activation=celu, exterior_activation=celu, initial_activation = relu)
     # check for obvious errors here
     length(dropouts)   > 0 && length(Ws) < maximum(dropouts)   ≤ 0 && error("invalid dropout layer position")
     length(normalizes) > 0 && length(Ws) < maximum(normalizes) ≤ 0 && error("invalid normalization layer position")
+    isa(exterior_activation, Vector{<:Function}) && (length(exterior_activation) != dₒ) ? error("invalid number of exterior activation functions") : nothing
 
     layers = LayerIterator(
                 [dᵢ; Ws; dₒ],
                 Set(dropouts),
                 Set(normalizes),
-                celu,
+                initial_activation,
                 exterior_activation,
                 interior_activation,
              )

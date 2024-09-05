@@ -286,9 +286,24 @@ function cor(x, y)
     return (mean(x.*y) .- μ.x.*μ.y) / sqrt(var.x*var.y)
 end
 
-function tanh_weight(x; ϵ = 5)
-    return x # Future me will regret this
-    #return tanh_fast(ϵ*x)/tanh_fast(ϵ)
+function soft_weight(x, ϵ)
+    return tanh_fast(ϵ*x)/tanh_fast(ϵ)
+end
+
+function hard_weight(x; ϵ = 0.5)
+    if x < 1 - ϵ
+        return x
+    else
+        return 1
+    end
+end
+
+function unit_step(x; δ = 0.6)
+    if x > δ
+        return 8
+    else
+        return 0.1
+    end
 end
 
 
@@ -311,14 +326,16 @@ function buildloss(model, D², param; data_mode)
         # distance softranks
         Dz² = param.g(z)
         Dx² = D²[i,i]
+        
+        #μx = unit_step.(softrank([maximum(col) for col in eachcol(Dx²)]))
 
         if param.γₓ == 0
             ϵₓ = 0
         else
             ϵₓ = 1 - mean([
                 cor(
-                    tanh_weight.(softrank(cx ./ mean(cx))),
-                    tanh_weight.(softrank(cz ./ mean(cz)))
+                    softrank(cx ./ mean(cx)),
+                    softrank(cz ./ mean(cz))
                 )
                 for (cx,cz) in zip(eachcol(Dx²),eachcol(Dz²))
             ])
@@ -398,7 +415,8 @@ function fitmodel(
     D²=nothing,
     dev=true,
     interior_activation=celu,
-    exterior_activation=tanh_fast
+    exterior_activation=celu,
+    initial_activation=celu,
 )
     D² = isnothing(D²) ? geodesics(data, param.k).^2 : D²
     if dev
@@ -409,6 +427,7 @@ function fitmodel(
           Ws         = param.Ws,
           normalizes = param.BN,
           dropouts   = param.DO,
+          initial_activation = initial_activation,
           interior_activation = interior_activation,
           exterior_activation = exterior_activation,
     )

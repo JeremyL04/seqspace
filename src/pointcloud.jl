@@ -275,6 +275,47 @@ function dijkstra!(dist, adj, src)
         end
     end
 end
+"""
+    dijkstra_paths(adj, src, target)
+
+Compute the shortest path from `src` to `target` given adjacency list `adj` using Dijkstra's algorithm. Returns array of indices indicating the path.
+"""
+
+function dijkstra_paths(adj, src, target)
+    dist = fill(∞, length(adj), length(adj))
+    dist[src] = 0
+
+    prev = fill(-1, length(dist))  # Array to track the predecessor of each node
+
+    Q = RankedQueue((src, 0.0))
+    sizehint!(Q, length(dist))
+
+    while length(Q) > 0
+        u, d₀ = take!(Q)
+        for (v, d₂) ∈ adj[u]
+            d₀₂ = d₀ + d₂
+            if d₀₂ < dist[v]
+                dist[v] = d₀₂
+                prev[v] = u  # Set the predecessor of v to be u
+                if v ∈ Q
+                    update!(Q, v, d₀₂)
+                else
+                    insert!(Q, v, d₀₂)
+                end
+            end
+        end
+    end
+
+    path = Int[]
+    while target != -1
+        push!(path, target)
+        target = prev[target]
+    end
+
+    return reverse!(path) 
+end
+
+
 
 """
     floyd_warshall(G :: Graph)
@@ -342,6 +383,29 @@ If sparse is true, it will utilize Dijkstra's algorithm, individually for each p
 If sparse is false, it will utilize the Floyd Warshall algorithm.
 """
 geodesics(x, k; D=missing, accept=(d)->true, sparse=true) = geodesics(neighborhood(x, k; D=D, accept=accept); sparse=sparse)
+
+"""
+    geodesic_paths(G :: Graph; sparse=true)
+
+Compute the matrix of pairwise geodesic paths, given a neighborhood graph `G`. Method not implemented with Floyd Warshall.
+"""
+function geodesic_paths(G :: Graph; sparse=true)
+    if sparse
+        adj  = adjacency_list(G)
+        paths = Array{Array{Int,1},2}(undef, length(G), length(G))
+
+        for v ∈ 1:length(G)
+            paths[v,v] = [v]
+            for u ∈ v:length(G)
+                paths[v,u] = dijkstra_paths(adj, v, u)
+                paths[u,v] = reverse(paths[v,u]) # Geodesic paths are symmetric (...hopefully)
+            end
+        end
+
+    else
+        error("Floyd Warshall not implemented for paths")
+    end
+end
 
 # ------------------------------------------------------------------------
 # non ml dimensional reduction
@@ -419,5 +483,59 @@ function test()
 
     return ks, ρ
 end
+
+function dijkstra_paths(adj, src, target)
+    dist = fill(∞, length(adj), length(adj))
+    dist[src] = 0
+
+    prev = fill(-1, length(dist))  # Array to track the predecessor of each node
+
+    Q = RankedQueue((src, 0.0))
+    sizehint!(Q, length(dist))
+
+    while length(Q) > 0
+        u, d₀ = take!(Q)
+        for (v, d₂) ∈ adj[u]
+            d₀₂ = d₀ + d₂
+            if d₀₂ < dist[v]
+                dist[v] = d₀₂
+                prev[v] = u  # Set the predecessor of v to be u
+                if v ∈ Q
+                    update!(Q, v, d₀₂)
+                else
+                    insert!(Q, v, d₀₂)
+                end
+            end
+        end
+    end
+
+    path = Int[]
+    while target != -1
+        push!(path, target)
+        target = prev[target]
+    end
+
+    return reverse!(path) 
+end
+
+function geodesic_paths(G :: Graph; sparse=true)
+    if sparse
+        adj  = adjacency_list(G)
+        paths = Array{Array{Int,1},2}(undef, length(G), length(G))
+
+        for v ∈ 1:length(G)
+            paths[v,v] = [v]
+            for u ∈ v:length(G)
+                paths[v,u] = dijkstra_paths(adj, v, u)
+                paths[u,v] = reverse(paths[v,u]) # Geodesic paths are symmetric (...hopefully)
+            end
+        end
+
+    else
+        error("Floyd Warshall not implemented for paths")
+    end
+end
+
+
 
 end

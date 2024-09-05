@@ -106,20 +106,20 @@ function MF_loss(z)
     return mean([mean(D[i][1,:])^2 + mean(D[i][2,:])^2 for i ∈ axes(D,1)])
 end
 
-        ϵᵤ = let
-            #Θ = [0, π/4, π/2, 3π/4] .- 0.001
-            Θ = collect(0:π/(8-1):π) .- 0.001
-            Nₛ = length(Θ)
-            N = size(z,2)
-            L = [abs(cos(Θ[i])) + abs(sin(Θ[i])) for i ∈ 1:Nₛ]
-            w = [collect(-L[i]:2L[i]/(N-1):L[i]) for i in 1:Nₛ]
-            ϵ = 0.1
-            W = [10*(σ.(-(w[i].+L[i])/ϵ) + σ.((w[i].-L[i])/ϵ)) .+ 1 for i ∈ 1:Nₛ]
-            proj = [[dot( point , [cos(θ),sin(θ)] ) for point ∈ eachcol(z)] for θ ∈ Θ]
-            Y = collect(0:1/(N-1):1)
-            InvCDFs = [[Radon.Square_InvCDFRadon(y,θ) for y ∈ Y] for θ ∈ Θ]
-            mean(mean([ (InvCDFs[i] - sort(proj[i])).^2 for i ∈ 1:length(Θ)]))
-        end
+        # ϵᵤ = let
+        #     #Θ = [0, π/4, π/2, 3π/4] .- 0.001
+        #     Θ = collect(0:π/(8-1):π) .- 0.001
+        #     Nₛ = length(Θ)
+        #     N = size(z,2)
+        #     L = [abs(cos(Θ[i])) + abs(sin(Θ[i])) for i ∈ 1:Nₛ]
+        #     w = [collect(-L[i]:2L[i]/(N-1):L[i]) for i in 1:Nₛ]
+        #     ϵ = 0.1
+        #     W = [10*(σ.(-(w[i].+L[i])/ϵ) + σ.((w[i].-L[i])/ϵ)) .+ 1 for i ∈ 1:Nₛ]
+        #     proj = [[dot( point , [cos(θ),sin(θ)] ) for point ∈ eachcol(z)] for θ ∈ Θ]
+        #     Y = collect(0:1/(N-1):1)
+        #     InvCDFs = [[Radon.Square_InvCDFRadon(y,θ) for y ∈ Y] for θ ∈ Θ]
+        #     mean(mean([ (InvCDFs[i] - sort(proj[i])).^2 for i ∈ 1:length(Θ)]))
+        # end
         
         # ϵᵤ = let
         #     centered_data = z .- sum(z)/length(z)

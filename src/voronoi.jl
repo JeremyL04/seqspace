@@ -47,7 +47,7 @@ function boundary_points(N, half_side = 1.0)
 end
 
 
-const NB = 16
+const NB = 4
 
 
 
@@ -60,14 +60,15 @@ const NB = 16
 
 function Delaunay_Triangulate(q)
     tri = triangulate(q)
-    faces = collect(tri.triangles)
-    triangulation = []
-    for f ∈ faces
-        if -1 ∉ f
-            push!(triangulation, f)
-        end
-    end
-    return hcat([collect(triangulation[i]) for i ∈ eachindex(triangulation)]...)
+    
+    # Sort the vertex indices within each triangle
+    sorted_triangles = [sort(collect(f)) for f in tri.triangles if -1 ∉ f]
+    
+    # Sort the columns lexicographically to ensure consistent output
+    triangulation = hcat(sorted_triangles...)
+    triangulation = triangulation[:, sortperm(eachcol(triangulation))]
+    
+    return triangulation
 end
 
 function areas(x)
