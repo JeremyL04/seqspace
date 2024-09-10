@@ -5,7 +5,7 @@ using DelaunayTriangulation
 
 import ChainRulesCore: rrule, NoTangent
 
-∧(x,y) = x[1,:].*y[2,:] .- x[2,:].*y[1,:]
+∧(u, v) = u[1] * v[2] - u[2] * v[1]
 
 """
     boundary(d)

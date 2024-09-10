@@ -161,6 +161,7 @@ function marshal(TrainingOutput::Tuple{Result,Any})
                 index=output.index,
                 D²=output.D²,
                 log=output.log,
+                initial_activation=output.initial_activation,
                 interior_activation=output.interior_activation,
                 exterior_activation=output.exterior_activation
                 )
@@ -172,13 +173,14 @@ end
 Deserialize a trained autoencoder from binary format to semantic format.
 Represents model as a collection of functors.
 """
-function unmarshal(MarshaledModel::Tuple{Result,Any})
+function unmarshal(MarshaledModel::Tuple{Result,Any}) # This needs to be re-worked with new data structures
     r = MarshaledModel[1]
     output = MarshaledModel[2]
     autoencoder = model(r.model.size, r.param.dₒ;
           Ws         = r.param.Ws,
           normalizes = r.param.BN,
           dropouts   = r.param.DO,
+          initial_activation = output.initial_activation,
           interior_activation = output.interior_activation,
           exterior_activation = output.exterior_activation
     )
@@ -286,23 +288,17 @@ function cor(x, y)
     return (mean(x.*y) .- μ.x.*μ.y) / sqrt(var.x*var.y)
 end
 
-function soft_weight(x, ϵ)
-    return tanh_fast(ϵ*x)/tanh_fast(ϵ)
+function soft_weight(x)
+    α = 5
+    return tanh_fast(α*x)/tanh_fast(α)
 end
 
-function hard_weight(x; ϵ = 0.5)
-    if x < 1 - ϵ
+function hard_weight(x)
+    α = 3
+    if x < 1/α
         return x
     else
         return 1
-    end
-end
-
-function unit_step(x; δ = 0.6)
-    if x > δ
-        return 8
-    else
-        return 0.1
     end
 end
 
@@ -315,7 +311,7 @@ Return a loss function used to train a neural network `model` according to input
 `pullback` and `pushforward` refers to the encoder and decoder layers respectively, while the identity is the composition.
 `D²` is a matrix of pairwise distances that will be used as a quenched hyperparameter in the distance soft rank loss.
 """
-function buildloss(model, D², param; data_mode)
+function buildloss(model, D², D¹, param; data_mode = false)
     return function(x, i::T, output::Bool) where T <: AbstractArray{Int,1}
         z = model.pullback(x)
         y = model.pushforward(z)
@@ -335,7 +331,7 @@ function buildloss(model, D², param; data_mode)
             ϵₓ = 1 - mean([
                 cor(
                     softrank(cx ./ mean(cx)),
-                    softrank(cz ./ mean(cz))
+                    softrank(cz ./ mean(cz)) 
                 )
                 for (cx,cz) in zip(eachcol(Dx²),eachcol(Dz²))
             ])
@@ -358,7 +354,23 @@ function buildloss(model, D², param; data_mode)
             #     mean(mean([ (InvCDFs[i] - sort(proj[i])).^2 for i ∈ 1:Nₛ]))
             # end
             
-            ϵᵤ = std(Voronoi.areas(z))
+            #ϵᵤ = std(Voronoi.areas(z))
+
+            # ϵᵤ = let 
+            #     # N = size(z, 2)
+            #     # n = N ÷ 10
+            #     # Ws = hcat(ones(n)',zeros(N - 2n)',ones(n)')
+            #     mean(mean(
+            #         Ws * (z[i, :] .- λ * (softrank(z[i, :]))).^2 
+            #         for (i, λ) in zip(1:2, [1, 0.44]))
+            #     )
+            # end
+
+            # ϵᵤ = let # This ideas needs to account for batching
+            #     [mean([PointCloud.calculate_angle(z[:,d[k]], z[:,d[k+1]]) for k ∈ 1:length(d) - 2]) for d ∈ D¹]
+            # end
+       
+            
         end
     
         if data_mode == true
@@ -422,6 +434,10 @@ function fitmodel(
     if dev
         println(stderr, "done computing geodesics...")
     end
+    D¹ = PointCloud.collect_top_paths(neighborhood(data, param.k), 3)
+    if true
+        println(stderr, "done computing top paths...")
+    end
 
     M = model(size(data,1), param.dₒ;
           Ws         = param.Ws,
@@ -435,8 +451,8 @@ function fitmodel(
     nvalid = size(data,2) - ((size(data,2)÷param.B)-param.V)*param.B
     batch, index = validate(data, nvalid)
 
-    loss = buildloss(M, D², param, data_mode = false)
-    data_loss = buildloss(M, D², param, data_mode = true)
+    loss = buildloss(M, D², D¹, param, data_mode = false)
+    data_loss = buildloss(M, D², D¹, param, data_mode = true)
 
     E    = (
         train = Float64[],
@@ -488,8 +504,9 @@ function fitmodel(
         index=index,
         D²=D²,
         log=log,
-        interior_activation=interior_activation,
-        exterior_activation=exterior_activation
+        initial_activation = initial_activation,
+        interior_activation = interior_activation,
+        exterior_activation = exterior_activation
     )
 end
 
@@ -539,7 +556,7 @@ function extendfit(result::Result, input, new_params, D², dev, data)
 end
 
 function version_info()
-    return "8/16 Version 1" # This is to test if Revise.jl is working
+    return "9/7 Version 1" # This is to test if Revise.jl is working
 end
 
 end

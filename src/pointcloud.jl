@@ -16,12 +16,14 @@ include("distance.jl")
 using .Distances
 
 export embed, upper_tri
-export neighborhood, geodesics, mds, isomap, scaling, local_connectors
+export neighborhood, geodesics, mds, isomap, scaling, local_connectors, geodesic_paths, weighted_angles
 
 # ------------------------------------------------------------------------
 # globals
 
 const ∞ = Inf
+
+∧(u, v) = u[1] * v[2] - u[2] * v[1]
 
 # ------------------------------------------------------------------------
 # utility functions
@@ -125,8 +127,8 @@ If `D` is given, it is assumed to be a dense matrix of pairwise distances.
 """
 function neighborhood(x, k :: T; D=missing, accept=(d)->true) where T <: Vector{Int64}
     D = ismissing(D) ? euclidean(x) : D
-    G = Graph([Vertex(x[:,i]) for i ∈ 1:size(x,2)])
-    for i ∈ 1:size(D,1)
+    G = Graph([Vertex(x[:,i]) for i ∈ axes(x,2)])
+    for i ∈ axes(D,1)
         neighbor = sortperm(D[i,:])[2:end]
         append!(G.edges, [Edge((i,j), D[i,j]) for j ∈ neighbor[1:k[i]] if accept(D[i,j])])
     end
@@ -142,8 +144,8 @@ If `D` is given, it is assumed to be a dense matrix of pairwise distances.
 """
 function neighborhood(x, k :: T; D=missing, accept=(d)->true) where T <: Integer
     D = ismissing(D) ? euclidean(x) : D
-    G = Graph([Vertex(x[:,i]) for i ∈ 1:size(x,2)])
-    for i ∈ 1:size(D,1)
+    G = Graph([Vertex(x[:,i]) for i ∈ axes(x,2)])
+    for i ∈ axes(D,1)
         neighbor = sortperm(D[i,:])[2:end]
         append!(G.edges, [Edge((i,j), D[i,j]) for j ∈ neighbor[1:k] if accept(D[i,j])])
     end
@@ -152,16 +154,16 @@ function neighborhood(x, k :: T; D=missing, accept=(d)->true) where T <: Integer
 end
 
 """
-    neighborhood(x, k :: T; D=missing, accept=(d)->true) where T <: AbstractFloat
+    neighborhood(x, r :: T; D=missing, accept=(d)->true) where T <: AbstractFloat
 
-Constructs a neighborhood graph of all neighbors within euclidean distance `k` for each point of cloud `x`.
+Constructs a neighborhood graph of all neighbors within euclidean distance `r` for each point of cloud `x`.
 If `D` is given, it is assumed to be a dense matrix of pairwise distances.
 """
-function neighborhood(x, k :: T; D=missing, accept=(d)->true) where T <: AbstractFloat
+function neighborhood(x, r :: T; D=missing, accept=(d)->true) where T <: AbstractFloat
     D = ismissing(D) ? euclidean(x) : D
-    G = Graph([Vertex(x[:,i]) for i ∈ 1:size(x,2)])
-    for i ∈ 1:size(D,1)
-        neighbor = first.(findall(0 .< D[:,i] .< k))
+    G = Graph([Vertex(x[:,i]) for i ∈ axes(x,2)])
+    for i ∈ axes(D,1)
+        neighbor = first.(findall(0 .< D[:,i] .< r))
         append!(G.edges, [Edge((i,j), D[i,j]) for j ∈ neighbor if accept(D[i,j])])
     end
 
@@ -237,6 +239,7 @@ function adjacency_list(G :: Graph)
     adj = [ Tuple{Int, Float64}[] for v ∈ 1:length(G.verts) ]
     for e ∈ G.edges
         v₁, v₂ = e.verts
+        # push!(adj[v₁], (v₂, e.distance))
         if (v₂,e.distance) ∉ adj[v₁]
             push!(adj[v₁], (v₂, e.distance))
         end
@@ -275,46 +278,6 @@ function dijkstra!(dist, adj, src)
         end
     end
 end
-"""
-    dijkstra_paths(adj, src, target)
-
-Compute the shortest path from `src` to `target` given adjacency list `adj` using Dijkstra's algorithm. Returns array of indices indicating the path.
-"""
-
-function dijkstra_paths(adj, src, target)
-    dist = fill(∞, length(adj), length(adj))
-    dist[src] = 0
-
-    prev = fill(-1, length(dist))  # Array to track the predecessor of each node
-
-    Q = RankedQueue((src, 0.0))
-    sizehint!(Q, length(dist))
-
-    while length(Q) > 0
-        u, d₀ = take!(Q)
-        for (v, d₂) ∈ adj[u]
-            d₀₂ = d₀ + d₂
-            if d₀₂ < dist[v]
-                dist[v] = d₀₂
-                prev[v] = u  # Set the predecessor of v to be u
-                if v ∈ Q
-                    update!(Q, v, d₀₂)
-                else
-                    insert!(Q, v, d₀₂)
-                end
-            end
-        end
-    end
-
-    path = Int[]
-    while target != -1
-        push!(path, target)
-        target = prev[target]
-    end
-
-    return reverse!(path) 
-end
-
 
 
 """
@@ -384,6 +347,77 @@ If sparse is false, it will utilize the Floyd Warshall algorithm.
 """
 geodesics(x, k; D=missing, accept=(d)->true, sparse=true) = geodesics(neighborhood(x, k; D=D, accept=accept); sparse=sparse)
 
+function geodesics(adj; sparse = true)
+    if sparse
+        adj  = adj
+        dist = zeros(length(adj), length(adj))
+
+        Threads.@threads for v ∈ 1:length(adj)
+            dijkstra!(view(dist,:,v), adj, v)
+        end
+
+        return dist
+    else
+        return error("Floyd Warshall not implemented for this")
+    end
+end
+
+
+# ------------------------------------------------------------------------ Geodesic Paths
+
+
+"""
+    dijkstra_paths(adj, src, target)
+
+Compute the shortest path from `src` to `target` given adjacency list `adj` using Dijkstra's algorithm. Returns array of indices indicating the path.
+"""
+
+function dijkstra_paths(adj, src, target = nothing)
+    N = length(adj)
+    dist = fill(∞, N)  # 1D array for distances from src
+    dist[src] = 0
+    
+    prev = fill(-1, N)  # Array to store previous nodes
+    
+    Q = RankedQueue((src, 0.0))  # Priority queue with the source node
+    sizehint!(Q, N)  # Reduce size hint to N (number of nodes)
+    
+    while length(Q) > 0
+        u, d₀ = take!(Q)
+        for (v, d₂) ∈ adj[u]
+            d₀₂ = d₀ + d₂
+            if d₀₂ < dist[v]
+                dist[v] = d₀₂
+                prev[v] = u 
+                if v ∈ Q
+                    update!(Q, v, d₀₂)
+                else
+                    insert!(Q, v, d₀₂)
+                end
+            end
+        end
+    end
+
+    paths = [Vector{Int}() for _ in 1:N]  # Pre-allocate the list of paths
+
+    for target in 1:N
+        t = target
+        while t != -1
+            push!(paths[target], t)  # Push nodes into the path directly
+            t = prev[t]
+        end
+        paths[target] = reverse(paths[target])  # Reverse to get the correct order
+    end
+    
+    if target !== nothing
+        return paths[target]
+    else
+        return paths
+    end
+    
+end
+
+
 """
     geodesic_paths(G :: Graph; sparse=true)
 
@@ -391,19 +425,102 @@ Compute the matrix of pairwise geodesic paths, given a neighborhood graph `G`. M
 """
 function geodesic_paths(G :: Graph; sparse=true)
     if sparse
-        adj  = adjacency_list(G)
-        paths = Array{Array{Int,1},2}(undef, length(G), length(G))
-
-        for v ∈ 1:length(G)
-            paths[v,v] = [v]
-            for u ∈ v:length(G)
-                paths[v,u] = dijkstra_paths(adj, v, u)
-                paths[u,v] = reverse(paths[v,u]) # Geodesic paths are symmetric (...hopefully)
-            end
-        end
-
+        adj = adjacency_list(G)
+        return hcat([dijkstra_paths(adj,i) for i ∈ 1:length(G)]...)
     else
         error("Floyd Warshall not implemented for paths")
+    end
+end
+
+"""
+    geodesic_paths(x, k; D=missing, accept=(d)->true, sparse=true)
+
+Compute the matrix of pairwise geodesic paths, given a pointcloud `x` and neighborhood cutoff `k`, from the resultant neighborhood graph.
+"""
+geodesic_paths(x, k; D=missing, accept=(d)->true, sparse=true) = geodesic_paths(neighborhood(x, k; D=D, accept=accept); sparse=sparse)
+
+"""
+    weighted_angles(G :: Graph)
+
+Compute the weighted angles between all points in the point cloud `x` given the neighborhood graph `G`.
+"""
+function weighted_angles(G :: Graph, z)
+    paths = geodesic_paths(G)
+    N = length(G)
+    θ = fill(0.0,N,N)
+
+    p = Vector{Vector{Float64}}(undef, N)
+    d = Vector{Vector{Float64}}(undef, N)
+
+    for i ∈ 1:N
+        for j ∈ i:N
+            path = paths[i, j]
+            n_path = length(path)
+
+            if n_path >= 3
+                coords = eachcol(z[:, path]) |> collect
+                d = [coords[k] - coords[k+1] for k ∈ 1:n_path - 1]
+
+                angles = [calculate_angle(d[k], d[k+1]) for k ∈ 1:n_path - 2]
+                θ[i, j] = sum(angles)
+                θ[j, i] = -θ[i, j]
+            end
+        end
+    end
+    return θ
+end
+
+"""
+    weighted_angles(x, k)
+
+Compute the weighted angles between all points in the point cloud `x` using the `k` nearest neighbors.
+"""
+function weighted_angles(x, k, z)
+    G = neighborhood(x, k)
+    paths = geodesic_paths(G)
+    N = length(G)
+    θ = fill(0.0,N,N)
+
+    p = Vector{Vector{Float64}}(undef, N)
+    d = Vector{Vector{Float64}}(undef, N)
+
+    for i ∈ 1:N
+        for j ∈ i:N
+            path = paths[i, j]
+            n_path = length(path)
+
+            if n_path >= 3
+                coords = eachcol(z[:, path]) |> collect
+                d = [coords[k] - coords[k+1] for k ∈ 1:n_path - 1]
+
+                angles = [PointCloud.calculate_angle(d[k], d[k+1]) for k ∈ 1:n_path - 2]
+                θ[i, j] = sum(angles)
+                θ[j, i] = -θ[i, j]
+            end
+        end
+    end
+    return θ
+end
+
+"""
+    collect_top_paths(G, N)
+    
+Collect the top `N` geodesic paths from the neighborhood graph `G` chosen by path length.
+"""
+function collect_top_paths(G, N)
+    Dx², paths = geodesics(G), geodesic_paths(G)
+    sorted_Dx² = sort(upper_tri(Dx²))
+    top_paths = [paths[findfirst(==(sorted_Dx²[end - i]), Dx²)] for i in 0:N-1]
+    return top_paths
+end
+
+
+function calculate_angle(v1, v2)
+    let
+        norm_product = norm(v1) * norm(v2)
+        angle = acos(v1 ⋅ v2 / norm_product)
+        cross_product_sign = sign(∧(v1, v2))
+        cross_product_sign * angle
     end
 end
 
@@ -483,59 +600,5 @@ function test()
 
     return ks, ρ
 end
-
-function dijkstra_paths(adj, src, target)
-    dist = fill(∞, length(adj), length(adj))
-    dist[src] = 0
-
-    prev = fill(-1, length(dist))  # Array to track the predecessor of each node
-
-    Q = RankedQueue((src, 0.0))
-    sizehint!(Q, length(dist))
-
-    while length(Q) > 0
-        u, d₀ = take!(Q)
-        for (v, d₂) ∈ adj[u]
-            d₀₂ = d₀ + d₂
-            if d₀₂ < dist[v]
-                dist[v] = d₀₂
-                prev[v] = u  # Set the predecessor of v to be u
-                if v ∈ Q
-                    update!(Q, v, d₀₂)
-                else
-                    insert!(Q, v, d₀₂)
-                end
-            end
-        end
-    end
-
-    path = Int[]
-    while target != -1
-        push!(path, target)
-        target = prev[target]
-    end
-
-    return reverse!(path) 
-end
-
-function geodesic_paths(G :: Graph; sparse=true)
-    if sparse
-        adj  = adjacency_list(G)
-        paths = Array{Array{Int,1},2}(undef, length(G), length(G))
-
-        for v ∈ 1:length(G)
-            paths[v,v] = [v]
-            for u ∈ v:length(G)
-                paths[v,u] = dijkstra_paths(adj, v, u)
-                paths[u,v] = reverse(paths[v,u]) # Geodesic paths are symmetric (...hopefully)
-            end
-        end
-
-    else
-        error("Floyd Warshall not implemented for paths")
-    end
-end
-
-
 
 end
