@@ -22,7 +22,7 @@ include("infer.jl")
 include("scrna.jl")
 include("voronoi.jl")
 
-using .PointCloud, .DataIO, .SoftRank, .ML, .Voronoi
+using .PointCloud, .DataIO, .SoftRank, .ML, .Voronoi, .Radon
 
 export Result, HyperParams
 export linearprojection, fitmodel, extendfit
@@ -89,7 +89,7 @@ end
 Generate the matrix of pairwise distances between vectors `x`, assuming the Euclidean metric.
 `x` is assumed to be ``d \times N`` where ``d`` denotes the dimensionality of the vector and ``N`` denotes the number.
 """
-const euclidean²(x) = sum( (x[d,:]' .- x[d,:]).^2 for d in 1:size(x,1) )
+const euclidean²(x) = sum( (x[d,:]' .- x[d,:]).^2 for d in axes(x,1) )
 
 """
     cylinders²(x)
@@ -185,7 +185,7 @@ function unmarshal(MarshaledModel::Tuple{Result,Any}) # This needs to be re-work
           exterior_activation = output.exterior_activation
     )
 
-    Flux.loadparams!(autoencoder.pullback,    r.model.pullback.params)
+    Flux.loadparams!(autoencoder.pullback, r.model.pullback.params)
     Flux.loadparams!(autoencoder.pushforward, r.model.pushforward.params)
     Flux.trainmode!(autoencoder.identity, false)
 
@@ -227,6 +227,7 @@ function unmarshal(MarshaledModel::Tuple{Result,Any}) # This needs to be re-work
         index=output.index,
         D²=output.D²,
         log=output.log,
+        initial_activation=output.initial_activation,
         interior_activation=output.interior_activation,
         exterior_activation=output.exterior_activation
     )
@@ -288,19 +289,6 @@ function cor(x, y)
     return (mean(x.*y) .- μ.x.*μ.y) / sqrt(var.x*var.y)
 end
 
-function soft_weight(x)
-    α = 5
-    return tanh_fast(α*x)/tanh_fast(α)
-end
-
-function hard_weight(x)
-    α = 3
-    if x < 1/α
-        return x
-    else
-        return 1
-    end
-end
 
 
 """
@@ -311,7 +299,20 @@ Return a loss function used to train a neural network `model` according to input
 `pullback` and `pushforward` refers to the encoder and decoder layers respectively, while the identity is the composition.
 `D²` is a matrix of pairwise distances that will be used as a quenched hyperparameter in the distance soft rank loss.
 """
-function buildloss(model, D², D¹, param; data_mode = false)
+function buildloss(model, D², param)
+    # Define constants for the uniform density loss outside of loss function so that they are not recomputed
+    # Put a flag here to determine if latent activation has custom actiavation layers
+    if propertynames(model.pullback[end]) == (:linear, :activations)
+        Λ = 2*[model.pullback[end].activations[i](0) for i in 1:param.dₒ]
+        boundary_points = corners(Λ)
+        latent_area = prod(Λ)
+    end
+
+    # ϕ = collect(0:0.01:π) .- 0.001
+    # ICDF_Splines = approximate_functions(ϕ, 0:0.01:1)
+    # Nₛ = 9
+
+
     return function(x, i::T, output::Bool) where T <: AbstractArray{Int,1}
         z = model.pullback(x)
         y = model.pushforward(z)
@@ -322,16 +323,14 @@ function buildloss(model, D², D¹, param; data_mode = false)
         # distance softranks
         Dz² = param.g(z)
         Dx² = D²[i,i]
-        
-        #μx = unit_step.(softrank([maximum(col) for col in eachcol(Dx²)]))
 
         if param.γₓ == 0
             ϵₓ = 0
         else
             ϵₓ = 1 - mean([
                 cor(
-                    softrank(cx ./ mean(cx)),
-                    softrank(cz ./ mean(cz)) 
+                    (softrank(cx ./ mean(cx))),
+                    (softrank(cz ./ mean(cz)))
                 )
                 for (cx,cz) in zip(eachcol(Dx²),eachcol(Dz²))
             ])
@@ -340,44 +339,58 @@ function buildloss(model, D², D¹, param; data_mode = false)
         if param.γᵤ == 0
             ϵᵤ = 0
         else 
+            # Voronoi/Dulaney
+                # ϵᵤ = std(areas(z,[-1 -1 1.0 1; -1 1 1 -1]))
+                ϵᵤ = let
+                    A = Voronoi.volumes(z)
+                    std(A)/mean(A)
+                end
+
+                # ϵᵤ = let
+                #     Areas = areas(z)
+                #     N_triangles = size(Areas,1)
+                #     # total_area = (sum(Areas) - latent_area)^2
+                #     sum(abs.(Areas .- (latent_area/N_triangles)))
+                # end
+
+                # print("\rUniform Density Loss: $ϵᵤ")
+                # ϵᵤ = (sum(areas(z)) - 4)^2
+
+                # ϵᵤ = let 
+                #     a₀ = 4 / length(z)
+                #     a = Voronoi.areas(z,[-1 -1 1.0 1; -1 1 1 -1])
+
+                #     mean((a./a₀ .- 1).^2)
+                # end
+
+            # Uniform Density
             # ϵᵤ = let
-            #     Θ = [0, π/4, π/2, 3π/4] .- 0.001
-            #     Nₛ = length(Θ)
-            #     N = size(z,2)
-            #     #L = [abs(cos(Θ[i])) + abs(sin(Θ[i])) for i ∈ 1:Nₛ]
-            #     #w = [collect(-L[i]:2L[i]/(N-1):L[i]) for i in 1:Nₛ]
-            #     #ϵ = 0.1
-            #     #W = [10*(σ.(-(w[i].+L[i])/ϵ) + σ.((w[i].-L[i])/ϵ)) .+ 1 for i ∈ 1:Nₛ]
-            #     proj = [[dot( point , [cos(θ),sin(θ)] ) for point ∈ eachcol(z)] for θ ∈ Θ]
-            #     Y = collect(0:1/(N-1):1)
-            #     InvCDFs = [[Radon.Square_InvCDFRadon(y,θ) for y ∈ Y] for θ ∈ Θ]
-            #     mean(mean([ (InvCDFs[i] - sort(proj[i])).^2 for i ∈ 1:Nₛ]))
-            # end
-            
-            #ϵᵤ = std(Voronoi.areas(z))
-
-            # ϵᵤ = let 
-            #     # N = size(z, 2)
-            #     # n = N ÷ 10
-            #     # Ws = hcat(ones(n)',zeros(N - 2n)',ones(n)')
-            #     mean(mean(
-            #         Ws * (z[i, :] .- λ * (softrank(z[i, :]))).^2 
-            #         for (i, λ) in zip(1:2, [1, 0.44]))
-            #     )
+            #     I = rand(1:length(ϕ), Nₛ)
+            #     Θ, ICDFs = ϕ[I], ICDF_Splines[I]
+            #     z̃ = z
+            #     # z̃ = ((2 * [1/Λ[1] 0; 0 1/Λ[2]]) * z) .- 1
+            #     ψₚ = [[dot(point, [cos(θ), sin(θ)]) for point ∈ eachcol(z̃)] for θ ∈ Θ]
+            #     Ranks = [softrank(ψ) for ψ ∈ ψₚ]
+            #     Y = [(r .- minimum(r)) ./ (1 .- minimum(r)) for r ∈ Ranks]
+            #     InvCDFs = [ICDFs[i].(Y[i]) for i ∈ eachindex(Θ)]
+            #     mean(mean.((F⁻¹ .- ψ).^4 for (F⁻¹, ψ) in zip(InvCDFs, ψₚ)))
             # end
 
-            # ϵᵤ = let # This ideas needs to account for batching
-            #     [mean([PointCloud.calculate_angle(z[:,d[k]], z[:,d[k+1]]) for k ∈ 1:length(d) - 2]) for d ∈ D¹]
-            # end
-       
-            
+            # Central Force Repulsion
+                # ϵᵤ = let
+                #     α = log(20) ./ sqrt(4/size(z,2))
+                #     Dz = SeqSpace.upper_tri(Dz²)
+                #     mean(exp.(-α*Dz))
+                # end
+
+                #     ϵ = 16*log(10)/(sqrt(latent_area/3039)) # 15log(10) chosen so l/2 is cutoff at 10^-8
+                #     mean(20*exp.(-ϵ*Dz)) # Constant to speed up convergence
+
         end
+
+        # print("\r ϵᵣ = $ϵᵣ, ϵₓ = $ϵₓ, ϵᵤ = $ϵᵤ")
     
-        if data_mode == true
-            return ϵᵣ,ϵₓ,ϵᵤ
-        else
-            return ϵᵣ + param.γₓ*ϵₓ + param.γᵤ*(ϵᵤ)
-        end
+        return (ϵᵣ,ϵₓ,ϵᵤ)
     end
 end
 
@@ -434,10 +447,6 @@ function fitmodel(
     if dev
         println(stderr, "done computing geodesics...")
     end
-    D¹ = PointCloud.collect_top_paths(neighborhood(data, param.k), 3)
-    if true
-        println(stderr, "done computing top paths...")
-    end
 
     M = model(size(data,1), param.dₒ;
           Ws         = param.Ws,
@@ -451,8 +460,8 @@ function fitmodel(
     nvalid = size(data,2) - ((size(data,2)÷param.B)-param.V)*param.B
     batch, index = validate(data, nvalid)
 
-    loss = buildloss(M, D², D¹, param, data_mode = false)
-    data_loss = buildloss(M, D², D¹, param, data_mode = true)
+    loss_peices = buildloss(M, D², param)
+    loss = (args...) -> dot((1, param.γₓ, param.γᵤ), loss_peices(args...))
 
     E    = (
         train = Float64[],
@@ -464,21 +473,21 @@ function fitmodel(
         𝕃ᵤ = Float64[],
         history = [] #TODO figure out the data struct of history and add it here 
     )
-
-    progress = Progress(Int(round(param.N/10)); desc=">training model", output=stderr)
+    progress = Progress(Int(round(param.N/10)); desc=">training model", output = stdout)
     log = (n) -> begin
         if (n-1) % param.δ == 0
-            push!(E.train, loss(batch.train, index.train, dev))
-            push!(E.valid, loss(batch.valid, index.valid, dev))
-            if dev
-                push!(Info.𝕃ᵣ, data_loss(batch.train, index.train, dev)[1])
-                push!(Info.𝕃ₓ, data_loss(batch.train, index.train, dev)[2])
-                push!(Info.𝕃ᵤ, data_loss(batch.train, index.train, dev)[3])
-            end
+            push!(E.train, loss(batch.train, index.train, false))
+            push!(E.valid, loss(batch.valid, index.valid, false))
+            # if dev
+            #     push!(Info.𝕃ᵣ, data_loss(batch.train, index.train, false)[1])
+            #     push!(Info.𝕃ₓ, data_loss(batch.train, index.train, false)[2])
+            #     push!(Info.𝕃ᵤ, data_loss(batch.train, index.train, false)[3])
+            # end
         end
 
         if (n-1) % 10 == 0
             next!(progress)
+            # print("\r ϵᵣ,ϵₓ,ϵᵤ = $(loss_peices(batch.train, index.train, false)); Epoch: $n")
         end
         
         if dev
@@ -487,14 +496,14 @@ function fitmodel(
         nothing
     end
 
-    Flux.trainmode!(M.identity, true)
+    Flux.trainmode!(M)
     train!(M, batch.train, index.train, loss;
         η   = param.η,
         B   = param.B,
         N   = param.N,
         log = log
     )
-    Flux.trainmode!(M.identity, false)
+    Flux.testmode!(M)
 
     #Reset the progress bar for re-training
     progress = Progress(Int(round(param.N/10)); desc=">training model (1% ≈ $(Int(round(param.N/10))) Epochs)", output=stderr)
@@ -516,20 +525,19 @@ end
 Retrain model within `result` on `input` data for `epochs` more iterations.
 Returns a new `Result`.
 """
-function extendfit(result::Result, input, new_params, D², dev, data)
-    loss = buildloss(M, D², param, data_mode = false)
-    data_loss = buildloss(M, D², param, data_mode = true)
+function extendfit(result::Result, input, new_params; dev = false, data = nothing)
+    loss = buildloss(result.model, input.D², new_params; data_mode = false)
+    data_loss = buildloss(result.model, input.D², new_params; data_mode = true)
 
-    progress = Progress(Int(round(new_params.N/10)); desc=">training model", output=stderr)
+    progress = Progress(param.N; desc=">training model", showvalues = stderr)
     log = (n) -> begin
         if (n-1) % new_params.δ == 0
             push!(result.loss.train, loss(input.batch.train, input.index.train, false))
             push!(result.loss.valid, loss(input.batch.valid, input.index.valid, false))
-            if dev
-                push!(result.info.𝕃ᵣ, data_loss(input.batch.train, input.index.train, false)[1])
-                push!(result.info.𝕃ₓ, data_loss(input.batch.train, input.index.train, false)[2])
-                push!(result.info.𝕃ᵤ, data_loss(input.batch.train, input.index.train, false)[3])
-            end
+
+            push!(result.info.𝕃ᵣ, data_loss(input.batch.train, input.index.train, false)[1])
+            push!(result.info.𝕃ₓ, data_loss(input.batch.train, input.index.train, false)[2])
+            push!(result.info.𝕃ᵤ, data_loss(input.batch.train, input.index.train, false)[3])
         end
 
         if (n-1) % 10 == 0

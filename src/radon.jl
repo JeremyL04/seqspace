@@ -3,6 +3,9 @@ module Radon
 using LinearAlgebra
 using Statistics
 using Roots: find_zero, rrule
+using Interpolations: cubic_spline_interpolation
+
+export approximate_functions
 
 #=
 TODO Lots of optimization to be done here. Add more arguments to the functions and have them return 
@@ -104,6 +107,16 @@ function MF_loss(z)
     D_full = ([eachcol((target_points[:,i] .- z)) for i ∈ axes(target_points,2)])
     D = [hcat(D_full[i][sortperm(norm.(D_full[i]))][1:N]...) for i ∈ axes(D_full,1)]
     return mean([mean(D[i][1,:])^2 + mean(D[i][2,:])^2 for i ∈ axes(D,1)])
+end
+
+function approximate_functions(angles, x_range)
+    functions = []
+    for θ in angles
+        itp_cubic = cubic_spline_interpolation(x_range, Square_InvCDFRadon.(x_range, θ))
+        f_cubic = t -> itp_cubic(t) # This line should not be combined with the previous one
+        push!(functions, f_cubic)
+    end
+    return functions
 end
 
         # ϵᵤ = let

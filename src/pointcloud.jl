@@ -16,7 +16,7 @@ include("distance.jl")
 using .Distances
 
 export embed, upper_tri
-export neighborhood, geodesics, mds, isomap, scaling, local_connectors, geodesic_paths, weighted_angles
+export neighborhood, geodesics, mds, isomap, scaling, geodesic_paths, avg_path_curvature
 
 # ------------------------------------------------------------------------
 # globals
@@ -45,7 +45,7 @@ function rrule(::typeof(upper_tri), m)
 			end
 			
 			∇m[i.I[1],i.I[2]] = ∇[n]
-			∇m[i.I[2],i.I[1]] = ∇[n]
+			# ∇m[i.I[2],i.I[1]] = ∇[n] # ChainRulesTestUtils.test_rrule fails with this line
 
 			n += 1
 		end
@@ -116,25 +116,11 @@ Graph(verts :: Array{Vertex{T},1}) where T <: Real = Graph{T}(verts, [])
 
 length(G :: Graph) = length(G.verts)
 
+Adj = Vector{Vector{Tuple{Int64, Float64}}}
+
 # ------------------------------------------------------------------------
 # operations
 
-"""
-    neighborhood(x, k :: T; D=missing, accept=(d)->true) where T <: Vector{Int}
-
-Constructs a neighborhood graph of the `k` nearest neighbor for each point of cloud `x`.
-If `D` is given, it is assumed to be a dense matrix of pairwise distances.
-"""
-function neighborhood(x, k :: T; D=missing, accept=(d)->true) where T <: Vector{Int64}
-    D = ismissing(D) ? euclidean(x) : D
-    G = Graph([Vertex(x[:,i]) for i ∈ axes(x,2)])
-    for i ∈ axes(D,1)
-        neighbor = sortperm(D[i,:])[2:end]
-        append!(G.edges, [Edge((i,j), D[i,j]) for j ∈ neighbor[1:k[i]] if accept(D[i,j])])
-    end
-
-    return G
-end
 
 """
     neighborhood(x, k :: T; D=missing, accept=(d)->true) where T <: Integer
@@ -188,47 +174,6 @@ function avg_nbhd_distance(x, k :: T) where T <: Integer
     return NBHD_sizes/maximum(NBHD_sizes)
 end
 
-"""
-WIP: 
-    local_connectors(NBHD_sizes :: Vector{T}, kₒ) where T <: AbstractFloat
-
-Returns the number of connectors for each point in the point cloud `x` based on the average neighborhood distance.
-"""
-
-
-function local_connectors(Ξ, kₒ)
-    # This is messy, but it works for now
-    if typeof(Ξ) <: Vector
-        NBHD_sizes = Ξ
-    elseif typeof(Ξ) <: Matrix
-        NBHD_sizes = avg_nbhd_distance(Ξ, kₒ)
-    else
-        error("Ξ must be a vector or matrix")
-    end
-
-
-    κ = Array{Int}(undef, length(NBHD_sizes))
-    μ = mean(NBHD_sizes)
-    σ = std(NBHD_sizes)
-    limits = [μ - 2σ, μ - σ, μ, μ + σ, μ + 2σ]
-    for i in eachindex(NBHD_sizes)
-        if NBHD_sizes[i] < limits[1]
-            κ[i] = kₒ - 2
-        elseif NBHD_sizes[i] < limits[2]
-            κ[i] = kₒ - 1
-        elseif NBHD_sizes[i] < limits[3]
-            κ[i] = kₒ
-        elseif NBHD_sizes[i] < limits[4]
-            κ[i] = kₒ 
-        elseif NBHD_sizes[i] < limits[5]
-            κ[i] = kₒ
-        else
-            κ[i] = kₒ
-        end
-    end
-    return κ
-end
-
 
 """
     adjacency_list(G :: Graph)
@@ -239,7 +184,6 @@ function adjacency_list(G :: Graph)
     adj = [ Tuple{Int, Float64}[] for v ∈ 1:length(G.verts) ]
     for e ∈ G.edges
         v₁, v₂ = e.verts
-        # push!(adj[v₁], (v₂, e.distance))
         if (v₂,e.distance) ∉ adj[v₁]
             push!(adj[v₁], (v₂, e.distance))
         end
@@ -347,7 +291,7 @@ If sparse is false, it will utilize the Floyd Warshall algorithm.
 """
 geodesics(x, k; D=missing, accept=(d)->true, sparse=true) = geodesics(neighborhood(x, k; D=D, accept=accept); sparse=sparse)
 
-function geodesics(adj; sparse = true)
+function geodesics(adj::Adj; sparse = true)
     if sparse
         adj  = adj
         dist = zeros(length(adj), length(adj))
@@ -417,7 +361,6 @@ function dijkstra_paths(adj, src, target = nothing)
     
 end
 
-
 """
     geodesic_paths(G :: Graph; sparse=true)
 
@@ -440,88 +383,67 @@ Compute the matrix of pairwise geodesic paths, given a pointcloud `x` and neighb
 geodesic_paths(x, k; D=missing, accept=(d)->true, sparse=true) = geodesic_paths(neighborhood(x, k; D=D, accept=accept); sparse=sparse)
 
 """
-    weighted_angles(G :: Graph)
+    geodesic_paths(adj::Adj; sparse=true)
 
-Compute the weighted angles between all points in the point cloud `x` given the neighborhood graph `G`.
+Compute the matrix of pairwise geodesic paths, given an adjacency list `adj`. Method not implemented with Floyd Warshall.
 """
-function weighted_angles(G :: Graph, z)
-    paths = geodesic_paths(G)
-    N = length(G)
-    θ = fill(0.0,N,N)
-
-    p = Vector{Vector{Float64}}(undef, N)
-    d = Vector{Vector{Float64}}(undef, N)
-
-    for i ∈ 1:N
-        for j ∈ i:N
-            path = paths[i, j]
-            n_path = length(path)
-
-            if n_path >= 3
-                coords = eachcol(z[:, path]) |> collect
-                d = [coords[k] - coords[k+1] for k ∈ 1:n_path - 1]
-
-                angles = [calculate_angle(d[k], d[k+1]) for k ∈ 1:n_path - 2]
-                θ[i, j] = sum(angles)
-                θ[j, i] = -θ[i, j]
-            end
-        end
+function geodesic_paths(adj::Adj; sparse = true)
+    if sparse
+        return hcat([dijkstra_paths(adj,i) for i ∈ 1:length(adj)]...)
+    else
+        error("Floyd Warshall not implemented for paths")
     end
-    return θ
-end
-
-"""
-    weighted_angles(x, k)
-
-Compute the weighted angles between all points in the point cloud `x` using the `k` nearest neighbors.
-"""
-function weighted_angles(x, k, z)
-    G = neighborhood(x, k)
-    paths = geodesic_paths(G)
-    N = length(G)
-    θ = fill(0.0,N,N)
-
-    p = Vector{Vector{Float64}}(undef, N)
-    d = Vector{Vector{Float64}}(undef, N)
-
-    for i ∈ 1:N
-        for j ∈ i:N
-            path = paths[i, j]
-            n_path = length(path)
-
-            if n_path >= 3
-                coords = eachcol(z[:, path]) |> collect
-                d = [coords[k] - coords[k+1] for k ∈ 1:n_path - 1]
-
-                angles = [PointCloud.calculate_angle(d[k], d[k+1]) for k ∈ 1:n_path - 2]
-                θ[i, j] = sum(angles)
-                θ[j, i] = -θ[i, j]
-            end
-        end
-    end
-    return θ
 end
 
 """
     collect_top_paths(G, N)
     
-Collect the top `N` geodesic paths from the neighborhood graph `G` chosen by path length.
+Collect the top `γ` percent of geodesic paths from the neighborhood graph `G` chosen by path length.
 """
-function collect_top_paths(G, N)
-    Dx², paths = geodesics(G), geodesic_paths(G)
-    sorted_Dx² = sort(upper_tri(Dx²))
-    top_paths = [paths[findfirst(==(sorted_Dx²[end - i]), Dx²)] for i in 0:N-1]
+function collect_top_paths(C ::Union{Graph,Adj}; γ = 0.05)
+    paths = upper_tri(geodesic_paths(C))
+    N = Int(round(γ * length(paths)))
+    top_paths = sort(paths, by=length, rev=true)[1:N]
     return top_paths
 end
 
+collect_top_paths(data, k; γ = 0.05) = collect_top_paths(neighborhood(data, k), γ = γ)
 
-function calculate_angle(v1, v2)
-    let
-        norm_product = norm(v1) * norm(v2)
-        angle = acos(v1 ⋅ v2 / norm_product)
-        cross_product_sign = sign(∧(v1, v2))
-        cross_product_sign * angle
-    end
+# ------------------------------------------------------------------------ Path Angles
+
+"""
+    calculate_signed_angle(v1, v2)
+
+Compute the angle between two vectors `v1` and `v2`.
+"""
+calculate_signed_angle(v1, v2) = sign(∧(v1, v2)) * acos((v1 ⋅ v2) / (norm(v1) * norm(v2)))
+
+"""
+    angles(path,data)
+
+Compute the angles between the vectors connecting the points in the path.
+"""
+function angles(path,data)
+    n_path = length(path)
+    if n_path >= 3
+        coords = eachcol(data[:, path]) |> collect
+        d = [coords[k] - coords[k+1] for k ∈ 1:n_path - 1]
+        angles = [calculate_signed_angle(d[k], d[k+1]) for k ∈ 1:n_path - 2]
+        return angles
+    else 
+        println("Path too short")
+    end 
+end
+
+function avg_path_curvature(high_data, k, low_data; γ = 0.05)
+    G = neighborhood(high_data, k)
+    paths = collect_top_paths(G;γ = γ)
+    [mean(angles(path,low_data)) for path ∈ paths]
+end
+
+function avg_path_curvature(adj::Adj, low_data; γ = 0.05)
+    paths = collect_top_paths(adj;γ = γ)
+    [mean(angles(path,low_data)) for path ∈ paths]
 end
 
 # ------------------------------------------------------------------------

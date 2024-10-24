@@ -31,6 +31,10 @@ function (m::CustomActivationLayer)(x)
     collect(hcat([m.activations[i].(z[i, :]) for i in axes(z,1)]...)')
 end
 
+# Make Flux.params() return the parameters of the Dense layer for marhsal/unmarshal
+Flux.@functor CustomActivationLayer
+trainable(l::CustomActivationLayer) = l.linear
+
 # Iterator
 """
     struct LayerIterator

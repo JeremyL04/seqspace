@@ -28,6 +28,17 @@ function spherical_distance(x; R=1)
     return R*atan.(sinΔψ, cosΔψ)
 end
 
+"""
+    cylinder(N; z_max=2, R=1/π)
+
+Generate a cylindrical point cloud of `N` points with extent of radius `R` and height `z_max`.
+"""
+function cylinder(N; z_max=2, R=1/π)
+    z = z_max * rand(Float64, N)
+    ϕ = 2π * rand(Float64, N)
+    return Float32.(hcat(R * cos.(ϕ), R * sin.(ϕ), z)'), hcat(ϕ, z)'
+end
+
 
 #=
 """
