@@ -6,7 +6,7 @@ using LinearAlgebra: norm, svd, Diagonal, dot, eigvals
 using Statistics: quantile, std
 using Flux, Zygote
 using ProgressMeter
-using Roots: find_zero, rrule
+using DelaunayTriangulation
 
 import BSON
 
@@ -31,6 +31,8 @@ export version_info
 
 # ------------------------------------------------------------------------
 # globals
+
+const square = Float32.([-1.0 -1.0 1.0 1.0; -1.0 1.0 1.0 -1.0])
 
 # ------------------------------------------------------------------------
 # types
@@ -304,8 +306,8 @@ function buildloss(model, D², param)
     # Put a flag here to determine if latent activation has custom actiavation layers
     if propertynames(model.pullback[end]) == (:linear, :activations)
         Λ = 2*[model.pullback[end].activations[i](0) for i in 1:param.dₒ]
-        boundary_points = corners(Λ)
-        latent_area = prod(Λ)
+        boundary_points = Float32.(sort_points_cw(corners_and_edges(Λ)))
+        latent_area = Float32.(prod(Λ))
     end
 
     # ϕ = collect(0:0.01:π) .- 0.001
@@ -340,30 +342,21 @@ function buildloss(model, D², param)
             ϵᵤ = 0
         else 
             # Voronoi/Dulaney
-                # ϵᵤ = std(areas(z,[-1 -1 1.0 1; -1 1 1 -1]))
-                ϵᵤ = let
-                    A = Voronoi.volumes(z)
-                    std(A)/mean(A)
-                end
 
-                # ϵᵤ = let
-                #     Areas = areas(z)
-                #     N_triangles = size(Areas,1)
-                #     # total_area = (sum(Areas) - latent_area)^2
-                #     sum(abs.(Areas .- (latent_area/N_triangles)))
-                # end
+            # # True Voronoi
+            ϵᵤ = let
+                N = size(z,2)
+                sum(abs.(voronoi_areas(z, boundary_points) .- (latent_area / Float32(N))))
+            end
 
-                # print("\rUniform Density Loss: $ϵᵤ")
-                # ϵᵤ = (sum(areas(z)) - 4)^2
+            # # Dulaney Triangles
+            # ϵᵤ = let
+            #     A = areas(z, boundary_points)
+            #     N_triangles = size(A,1)
+            #     sum(abs.(A .- (latent_area/N_triangles)))
+            # end
 
-                # ϵᵤ = let 
-                #     a₀ = 4 / length(z)
-                #     a = Voronoi.areas(z,[-1 -1 1.0 1; -1 1 1 -1])
-
-                #     mean((a./a₀ .- 1).^2)
-                # end
-
-            # Uniform Density
+            # # Radon Slicing
             # ϵᵤ = let
             #     I = rand(1:length(ϕ), Nₛ)
             #     Θ, ICDFs = ϕ[I], ICDF_Splines[I]
@@ -376,20 +369,8 @@ function buildloss(model, D², param)
             #     mean(mean.((F⁻¹ .- ψ).^4 for (F⁻¹, ψ) in zip(InvCDFs, ψₚ)))
             # end
 
-            # Central Force Repulsion
-                # ϵᵤ = let
-                #     α = log(20) ./ sqrt(4/size(z,2))
-                #     Dz = SeqSpace.upper_tri(Dz²)
-                #     mean(exp.(-α*Dz))
-                # end
-
-                #     ϵ = 16*log(10)/(sqrt(latent_area/3039)) # 15log(10) chosen so l/2 is cutoff at 10^-8
-                #     mean(20*exp.(-ϵ*Dz)) # Constant to speed up convergence
-
         end
 
-        # print("\r ϵᵣ = $ϵᵣ, ϵₓ = $ϵₓ, ϵᵤ = $ϵᵤ")
-    
         return (ϵᵣ,ϵₓ,ϵᵤ)
     end
 end
@@ -478,6 +459,8 @@ function fitmodel(
         if (n-1) % param.δ == 0
             push!(E.train, loss(batch.train, index.train, false))
             push!(E.valid, loss(batch.valid, index.valid, false))
+            # print("\r ϵᵣ,ϵₓ,ϵᵤ = $(loss_peices(batch.train, index.train, false)); Epoch: $n")
+
             # if dev
             #     push!(Info.𝕃ᵣ, data_loss(batch.train, index.train, false)[1])
             #     push!(Info.𝕃ₓ, data_loss(batch.train, index.train, false)[2])
@@ -487,7 +470,6 @@ function fitmodel(
 
         if (n-1) % 10 == 0
             next!(progress)
-            # print("\r ϵᵣ,ϵₓ,ϵᵤ = $(loss_peices(batch.train, index.train, false)); Epoch: $n")
         end
         
         if dev
@@ -526,10 +508,11 @@ Retrain model within `result` on `input` data for `epochs` more iterations.
 Returns a new `Result`.
 """
 function extendfit(result::Result, input, new_params; dev = false, data = nothing)
-    loss = buildloss(result.model, input.D², new_params; data_mode = false)
-    data_loss = buildloss(result.model, input.D², new_params; data_mode = true)
+    loss_peices = buildloss(result.model, input.D², new_params)
+    loss = (args...) -> dot((1, new_params.γₓ, new_params.γᵤ), loss_peices(args...))
+    data_loss = buildloss(result.model, input.D², new_params)
 
-    progress = Progress(param.N; desc=">training model", showvalues = stderr)
+    progress = Progress(new_params.N; desc=">training model", output = stderr)
     log = (n) -> begin
         if (n-1) % new_params.δ == 0
             push!(result.loss.train, loss(input.batch.train, input.index.train, false))

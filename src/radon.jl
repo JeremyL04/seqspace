@@ -2,7 +2,7 @@ module Radon
 
 using LinearAlgebra
 using Statistics
-using Roots: find_zero, rrule
+using Roots: find_zero
 using Interpolations: cubic_spline_interpolation
 
 export approximate_functions
