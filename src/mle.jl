@@ -1,6 +1,7 @@
 module MLE
 
 using ProgressMeter
+using ForwardDiff ## ADDED FOR DEBUGGING
 using LinearAlgebra, Statistics, StatsBase
 using GSL, Optim, NLSolversBase
 using SpecialFunctions: erfinv, loggamma
@@ -33,6 +34,27 @@ function negative_binomial(x⃗, z⃗, Γ)
                 + γ*log(γ)
                 - (x+γ)*log(exp(α+β*z)+γ) for (x,z) ∈ zip(x⃗,z⃗))
 
+                # for (i, (xx, zz)) in enumerate(zip(x⃗, z⃗)) # FOR DEBUGGING
+                #     # Unwrap the dual numbers to get plain Float64 values
+                #     xx_val = ForwardDiff.value(xx)
+                #     zz_val = ForwardDiff.value(zz)
+                #     α_val  = ForwardDiff.value(α)
+                #     β_val  = ForwardDiff.value(β)
+                #     γ_val  = ForwardDiff.value(γ)
+                    
+                #     μ_val = exp(α_val + β_val * zz_val)
+                #     val = loggamma(xx_val + γ_val) - loggamma(xx_val + 1) - loggamma(γ_val) +
+                #           xx_val * (α_val + β_val * zz_val) + γ_val * log(γ_val) - (xx_val + γ_val) * log(μ_val + γ_val)
+                    
+                #     if isnan(val) || isinf(val)
+                #         println("Error at index $i:")
+                #         println("  xx = $xx_val")
+                #         println("  zz = $zz_val")
+                #         println("  μ  = $μ_val")
+                #         println("  val = $val")
+                #     end
+                # end
+                
             return -sum(L) + 0.5*δβ¯²*(β-β̄)^2
         end
     else
@@ -232,7 +254,7 @@ const FitType = NamedTuple{
 # log link function is assumed
 function fit_glm(model::Symbol, data; Γ=(β̄=1,δβ¯²=10,Γᵧ=nothing), run=(x)->true)
     Σ = vec(mean(data, dims=1))
-
+    
     foundmodel = try
         getfield(MLE, model)
     catch

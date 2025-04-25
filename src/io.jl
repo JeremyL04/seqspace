@@ -8,7 +8,7 @@ using SparseArrays
 
 export root
 export read_ply, read_obj
-export read_mtx, read_features, read_barcodes, read_matrix, expand_matrix
+export read_mtx, read_features, read_barcodes, read_matrix, expand_matrix, read_dge
 
 # ------------------------------------------------------------------------
 # globals
@@ -323,7 +323,7 @@ function expand_matrix(io::IO, dir::String)
     end
     mkdir(dir)
 
-    data, genes, barcodes = read_matrix(io; type=Int, named_cols=true, start_cols=2, named_rows=true)
+    data, genes, barcodes = read_matrix(io; type=Int, named_cols=true, start_cols=3, named_rows=true)
 
     open("$dir/barcodes.tsv", "w") do fd
         write(fd, barcodes[1])
@@ -351,6 +351,49 @@ function expand_matrix(io::IO, dir::String)
             end
         end
     end
+end
+
+function read_dge(io::IO; type=Float64, named_cols=false, named_rows=false, start_cols=1, start_rows=1)
+    # Read column headers if needed
+    cols = nothing
+    if named_cols
+        first_line = readline(io)
+        if named_rows
+            cols = split(first_line)[(start_cols+1):end]  # Skip the first column (row names)
+        else
+            cols = split(first_line)[start_cols:end]
+        end
+    end
+
+    # Store current file position to avoid consuming lines
+    x = position(io)
+
+    # Count number of rows without consuming data
+    nrows = sum(1 for _ in eachline(io)) - start_rows
+    seek(io, x)  # Go back to start
+
+    # Initialize data storage
+    data = Array{type,2}(undef, nrows, length(cols))
+    rows = named_rows ? Array{String,1}(undef, nrows) : nothing
+
+    # Read data line by line
+    for (i, row) in enumerate(eachline(io))
+        if i <= start_rows
+            continue
+        end
+        idx = i - start_rows  # Adjust index for storage
+    
+        entry = split(row)  # Split on whitespace
+    
+        if named_rows
+            rows[idx] = entry[1]      # First column is gene name
+            entry = entry[2:end]        # Remove the gene name
+        end
+    
+        data[idx, :] = parse.(type, entry)
+    end
+
+    return data, rows, cols
 end
 
 # ------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 module scRNA
 
 using GSL
-using Statistics, StatsBase, Distributions
+using Statistics, StatsBase, Distributions, NMF
 using SpecialFunctions
 
 import Base:
@@ -17,7 +17,7 @@ include("io.jl")
 include("mle.jl")
 include("util.jl")
 
-using .DataIO: read_mtx, read_barcodes, read_features
+using .DataIO: read_mtx, read_barcodes, read_features, read_dge
 
 export barcodes, genes
 
@@ -238,25 +238,35 @@ The directory is expected to contain the following files:
 If `batch` is not missing, then it will be appended to each cell label.
 """
 function load(dir::AbstractString; batch=missing)
-    !isdir(dir) && error("directory '$dir' not found")
 
-    files = readdir(dir)
+    if occursin(".txt", dir) #XXX Added this to support reading from a single DGE file... maybe better as an overload
+        open(dir) do io
+            counts, genes, cells = read_dge(io; named_rows=true, named_cols=true)
+            return Count(counts, genes, cells)
+        end
 
-    BarcodeFile ∉ files && error("'$BarcodeFile' not found in directory '$dir'")
-    FeatureFile ∉ files && error("'$FeatureFile' not found in directory '$dir'")
-    CountMatrix ∉ files && error("'$CountMatrix' not found in directory '$dir'")
+    else
+        !isdir(dir) && error("directory '$dir' not found")
 
-    data     = open(read_mtx,      "$dir/$CountMatrix")
-    barcodes = open(read_barcodes, "$dir/$BarcodeFile")
-    features = open(read_features, "$dir/$FeatureFile")
+        files = readdir(dir)
 
-    length(barcodes) ≠ size(data,2) && error("number of barcodes $(length(barcodes)) ≠ number of columns $(size(counts,2)). check data")
-    length(features) ≠ size(data,1) && error("number of features $(length(features)) ≠ number of rows $(size(counts,1)). check data")
+        BarcodeFile ∉ files && error("'$BarcodeFile' not found in directory '$dir'")
+        FeatureFile ∉ files && error("'$FeatureFile' not found in directory '$dir'")
+        CountMatrix ∉ files && error("'$CountMatrix' not found in directory '$dir'")
 
-    # TODO: accept sparse inputs?
-    prepend = ismissing(batch) ? (bc) -> bc : (bc) -> batch * "/" * bc
-    return Count(Matrix(data),features,map(prepend,barcodes))
+        data     = open(read_mtx,      "$dir/$CountMatrix")
+        barcodes = open(read_barcodes, "$dir/$BarcodeFile")
+        features = open(read_features, "$dir/$FeatureFile")
+
+        length(barcodes) ≠ size(data,2) && error("number of barcodes $(length(barcodes)) ≠ number of columns $(size(counts,2)). check data")
+        length(features) ≠ size(data,1) && error("number of features $(length(features)) ≠ number of rows $(size(counts,1)). check data")
+
+        # TODO: accept sparse inputs?
+        prepend = ismissing(batch) ? (bc) -> bc : (bc) -> batch * "/" * bc
+        return Count(Matrix(data),features,map(prepend,barcodes))
+    end
 end
+
 
 matchperm(a, b) = findfirst.(isequal.(a), (b,))
 
@@ -346,8 +356,8 @@ end
 # ------------------------------------------------------------------------
 # normalization
 
-function normalize(seq::Count; β₀=1, δβ¯²=10)
-    _, p = MLE.fit_glm(:negative_binomial, seq;
+function normalize(seq::Count; δ=10, β₀=1, δβ¯²=10)
+    p = MLE.fit_glm(:negative_binomial, seq;
         Γ=(β̄=β₀, δβ¯²=δβ¯², Γᵧ=nothing),
         run=(x) -> mean(x) > 1			
     )
@@ -357,37 +367,46 @@ function normalize(seq::Count; β₀=1, δβ¯²=10)
     model = MLE.generalized_normal(logγ)
     param = MLE.fit(model)
 
-    _, p = MLE.fit_glm(:negative_binomial, seq;
+    p = MLE.fit_glm(:negative_binomial, seq;
        Γ=(β̄=β₀, δβ¯²=δβ¯², Γᵧ=param)
     )
 
-    X, u, v = let
-        σ² = X.*(X.+p.γ) ./ (1 .+ p.γ)
+    # normalize variance of count matrix. estimate rank
+
+    N, σ², u², v² = let
+        σ² = seq.*(seq.+p.γ) ./ (1 .+ p.γ)
         u², v², _ = Utility.sinkhorn(σ²)
 
-        (Diagonal(.√u²) * seq * Diagonal(.√v²)), .√u², .√v²
+        (Diagonal(.√u²) * seq * Diagonal(.√v²)), (Diagonal(u²) * σ² * Diagonal(v²)), u², v²
     end
 
-    d = sum(λ .> (sqrt(size(X,1))+sqrt(size(X,2)))) + 10
-    Y = let
-        F = svd(X)
-        F.U[:,1:d]*Diagonal(F.S[1:d])*F.Vt[1:d,:]
+    Λ = svd(N)
+    λ = Λ.S
+    R = sum(λ .> (sqrt(size(N,1))+sqrt(size(N,2))) + δ) 
+
+    # reduce rank to signal directions
+    N, c = let
+        r = nnmf(N, R; alg=:cd)
+        m = r.W*r.H
+        m, cor(m[:], N[:])
     end
 
-    r, c, _ = Utility.sinkhorn(Y)
-    Z = Diagonal(r)*Y*Diagonal(c)
+    # renormalize; this is done instead of the z-score #XXX: I'm not convinced this is correct
+    N, u, v = let
+        u, v, _ = Utility.sinkhorn(N)
+        (Diagonal(u) * N * Diagonal(v)), u, v
+    end
 
     return (
-        normalized = Count(Z, seq.cell, seq.gene),
-        transform = (norm) -> let
-            seq = Diagonal(1 ./(r.*u)) * norm * Diagonal(1 ./(c.*v))
-            depth = sum(seq,dims=1)
-            scale = mean(vec(depth))
-
-            scale * (seq ./ depth)
-        end
+        counts   = Count(N, seq.gene, seq.cell),
+        rank      = R,
+        corr      = c,
+        varnorm   = (row=u², col=v²),
+        scalenorm = (row=u,  col=v),
+        mleparam  = p,
     )
 end
+
 
 # ------------------------------------------------------------------------
 # synthetic data generation

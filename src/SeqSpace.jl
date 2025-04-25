@@ -21,6 +21,7 @@ include("manifold.jl")
 include("infer.jl")
 include("scrna.jl")
 include("voronoi.jl")
+include("util.jl")
 
 using .PointCloud, .DataIO, .SoftRank, .ML, .Voronoi, .Radon
 
@@ -488,7 +489,7 @@ function fitmodel(
     Flux.testmode!(M)
 
     #Reset the progress bar for re-training
-    progress = Progress(Int(round(param.N/10)); desc=">training model (1% ≈ $(Int(round(param.N/10))) Epochs)", output=stderr)
+    # progress = Progress(Int(round(param.N/10)); desc=">training model (1% ≈ $(Int(round(param.N/10))) Epochs)", output=stderr)
     
     return Result(param, E, Info, M), (
         batch=batch,
@@ -512,7 +513,7 @@ function extendfit(result::Result, input, new_params; dev = false, data = nothin
     loss = (args...) -> dot((1, new_params.γₓ, new_params.γᵤ), loss_peices(args...))
     data_loss = buildloss(result.model, input.D², new_params)
 
-    progress = Progress(new_params.N; desc=">training model", output = stderr)
+    progress = Progress(Int(round(new_params.N/10)); desc=">training model", output = stdout)
     log = (n) -> begin
         if (n-1) % new_params.δ == 0
             push!(result.loss.train, loss(input.batch.train, input.index.train, false))
@@ -544,10 +545,6 @@ function extendfit(result::Result, input, new_params; dev = false, data = nothin
 
 
     return Result(new_params, result.loss, result.info, result.model), input
-end
-
-function version_info()
-    return "9/7 Version 1" # This is to test if Revise.jl is working
 end
 
 end

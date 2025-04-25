@@ -30,40 +30,6 @@ function boundary_corners(d)
     return b
 end
 
-function corners_and_edges(widths::AbstractVector{<:Real}, n_points_per_edge::Int=0)
-    # Generate all corners of the box
-    dims = [[0.0, w] for w in widths]
-    corners = [collect(corner) for corner in Iterators.product(dims...)]
-
-    # If no additional points are requested, return only the corners
-    if n_points_per_edge == 0
-        return Float32.(hcat(corners...))
-    end
-
-    # Generate edges by connecting corners differing in one coordinate
-    edges = []
-    for corner in corners
-        for i in axes(widths,1)
-            if corner[i] == 0.0
-                p2 = copy(corner)
-                p2[i] = widths[i]
-                push!(edges, (corner, p2))
-            end
-        end
-    end
-
-    # Generate points along each edge
-    ts = range(0, 1, length=n_points_per_edge + 2)
-    points = [ (1 - t) .* p1 .+ t .* p2 for (p1, p2) in edges, t in ts ]
-
-    # Remove duplicate points
-    unique_points = unique(points)
-
-    # Convert to Float32 array
-    return Float32.(hcat(unique_points...))
-end
-
-
 
 # For use with DelaunayTriangulate.jl
 function PureDelaunayTri(X) 
