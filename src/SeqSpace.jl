@@ -22,6 +22,8 @@ include("infer.jl")
 include("scrna.jl")
 include("voronoi.jl")
 include("util.jl")
+include("mle.jl")
+
 
 using .PointCloud, .DataIO, .SoftRank, .ML, .Voronoi, .Radon
 
@@ -546,5 +548,10 @@ function extendfit(result::Result, input, new_params; dev = false, data = nothin
 
     return Result(new_params, result.loss, result.info, result.model), input
 end
+
+function test_Revise_main(x)
+    return println("Testing 1.0")
+end
+
 
 end

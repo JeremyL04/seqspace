@@ -17,9 +17,10 @@ include("io.jl")
 include("mle.jl")
 include("util.jl")
 
+
 using .DataIO: read_mtx, read_barcodes, read_features, read_dge
 
-export barcodes, genes
+export barcodes, genes, Count
 
 # ------------------------------------------------------------------------
 # globals
@@ -353,58 +354,69 @@ function filterbarcodes(seq::Count)
     return seq
 end
 
-# ------------------------------------------------------------------------
-# normalization
-
-function normalize(seq::Count; δ=10, β₀=1, δβ¯²=10)
-    p = MLE.fit_glm(:negative_binomial, seq;
-        Γ=(β̄=β₀, δβ¯²=δβ¯², Γᵧ=nothing),
-        run=(x) -> mean(x) > 1			
-    )
-
-    logγ = log.(p.γ)
-
-    model = MLE.generalized_normal(logγ)
-    param = MLE.fit(model)
-
-    p = MLE.fit_glm(:negative_binomial, seq;
-       Γ=(β̄=β₀, δβ¯²=δβ¯², Γᵧ=param)
-    )
-
-    # normalize variance of count matrix. estimate rank
-
-    N, σ², u², v² = let
-        σ² = seq.*(seq.+p.γ) ./ (1 .+ p.γ)
-        u², v², _ = Utility.sinkhorn(σ²)
-
-        (Diagonal(.√u²) * seq * Diagonal(.√v²)), (Diagonal(u²) * σ² * Diagonal(v²)), u², v²
+function counts(dir::String, subdir::String; chatty = true)
+    # helper to wrap any filter + logging
+    function filter_and_log(f, count, dim::Int, desc::AbstractString)
+        if chatty
+            n_before = size(count, dim)
+        end
+        count = f(count)
+        if chatty
+            n_after = size(count, dim)
+            kind = dim == 2 ? "cells" : "genes"
+            println("Removed $(n_before - n_after) $desc out of $(n_before) total $kind")
+        end
+        return count
     end
 
-    Λ = svd(N)
-    λ = Λ.S
-    R = sum(λ .> (sqrt(size(N,1))+sqrt(size(N,2))) + δ) 
-
-    # reduce rank to signal directions
-    N, c = let
-        r = nnmf(N, R; alg=:cd)
-        m = r.W*r.H
-        m, cor(m[:], N[:])
-    end
-
-    # renormalize; this is done instead of the z-score #XXX: I'm not convinced this is correct
-    N, u, v = let
-        u, v, _ = Utility.sinkhorn(N)
-        (Diagonal(u) * N * Diagonal(v)), u, v
-    end
-
-    return (
-        counts   = Count(N, seq.gene, seq.cell),
-        rank      = R,
-        corr      = c,
-        varnorm   = (row=u², col=v²),
-        scalenorm = (row=u,  col=v),
-        mleparam  = p,
+    # 1) load & union
+    count = reduce(∪,
+        scRNA.load("$dir/$d") for d ∈ readdir(dir) if occursin(subdir, d)
     )
+
+    # 2) remove non-mel cells
+    markers = (
+        dvir = scRNA.searchloci(count, "Dvir_"),
+    )
+    count = filter_and_log(count, 2, "cells with high Dvir expression") do cnt
+        scRNA.filtercell(cnt) do cell, _
+            sum(cell[markers.dvir]) < .10*sum(cell)
+        end
+    end
+
+    # 3) remove low-count / non-mel genes
+    count = filter_and_log(count, 1, "Dvir genes") do cnt
+        scRNA.filtergene(cnt) do row, gene
+            !occursin("Dvir_", gene)
+        end
+    end
+
+    # 4) remove yolk & pole cells
+    markers = (
+        yolk = scRNA.locus(count, "sisA", "CG8129", "Corp", "CG8195", "CNT1", "ZnT77C"),
+        pole = scRNA.locus(count, "pgc"),
+    )
+    count = filter_and_log(count, 2, "cells with yolk & pole expression") do cnt
+        scRNA.filtercell(cnt) do cell, _
+            (sum(cell[markers.yolk]) < 10 && sum(cell[markers.pole]) < 3)
+        end
+    end
+
+    # 5) remove low-count cells
+    count = filter_and_log(count, 2, "cells low counts + high number of non-zero counts") do cnt
+        scRNA.filtercell(cnt) do cell, _
+            (sum(cell) > 1e3 && sum(cell .> 1) > 20)
+        end
+    end
+
+    # 6) remove lowly expressed genes
+    count = filter_and_log(count, 1, "low expression genes") do cnt
+        scRNA.filtergene(cnt) do row, _
+            sum(row .> 1) > 20
+        end
+    end
+
+    return count.data, count.gene, count.cell
 end
 
 
@@ -459,6 +471,10 @@ function generate(ngene, ncell; ρ=(α=Gamma(0.25,2), β=Normal(1,.01), γ=Gamma
         γ    = γ,
         ḡ    = exp.(z),
    )
+end
+
+function TestReviseSCRNA()
+    return println("TestReviseSCRNA 5:42")
 end
 
 end

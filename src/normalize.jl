@@ -2,8 +2,17 @@ module Normalize
 
 using LinearAlgebra
 using Optim, NLSolversBase
-using Random, Statistics, StatsBase
+using Random, Statistics, StatsBase, NMF
 using SpecialFunctions: loggamma
+using GSL, ProgressMeter
+
+include("scrna.jl")
+include("util.jl")
+using .scRNA: Count
+
+incbeta(a,b,x) = GSL.sf_beta_inc(a,b,x)
+incgamma(a,x)  = GSL.sf_gamma_inc_P(a,x)
+
 
 const ∞ = Inf
 
@@ -26,19 +35,36 @@ const logvar(x;ϵ=1)  = exp.(var(log.(x.+ϵ)))-ϵ
 
 Compute the log likelihood of a negative binomial generalized linear model (GLM) with log link function for `count` of a single gene.
 The sequencing depth for each sequenced cell is assumed to be the only confounding variables.
+A prior on Θ₂ is assumed to be Gaussian with mean `Θ̄₂` and variance `δΘ₂⁻²`.
 """
-function negativebinomial(count, depth)
-    loglikelihood = function(Θ)
-        Θ₁,Θ₂,Θ₃ = Θ
-        return -sum(
-            loggamma(n+Θ₃)
-          - loggamma(n+1)
-          - loggamma(Θ₃)
-          + n*(Θ₁+Θ₂*d)
-          + Θ₃*log(Θ₃)
-          - (n+Θ₃)*log(exp(Θ₁+Θ₂*d)+Θ₃)
-          for (n,d) ∈ zip(count,depth)
-        )
+function negativebinomial(count, depth; Θ̄₂=1, δΘ₂⁻²=5, Θ₃_priors = nothing)
+    if isnothing(Θ₃_priors)
+        loglikelihood = function(Θ)
+            Θ₁,Θ₂,Θ₃ = Θ
+            return -sum(
+                loggamma(n+Θ₃)
+            - loggamma(n+1)
+            - loggamma(Θ₃)
+            + n*(Θ₁+Θ₂*d)
+            + Θ₃*log(Θ₃)
+            - (n+Θ₃)*log(exp(Θ₁+Θ₂*d)+Θ₃)
+            for (n,d) ∈ zip(count,depth)
+            ) + 0.5*δΘ₂⁻²*(Θ₂-Θ̄₂)^2
+        end
+    else
+        loglikelihood = function(Θ)
+            Θ₁,Θ₂,Θ₃ = Θ
+            μ,σ,ν = Θ₃_priors
+            return -sum(
+                loggamma(n+Θ₃)
+            - loggamma(n+1)
+            - loggamma(Θ₃)
+            + n*(Θ₁+Θ₂*d)
+            + Θ₃*log(Θ₃)
+            - (n+Θ₃)*log(exp(Θ₁+Θ₂*d)+Θ₃)
+            for (n,d) ∈ zip(count,depth)
+            ) + 0.5*δΘ₂⁻²*(Θ₂-Θ̄₂)^2 + (abs(log(Θ₃)-μ)/σ)^ν
+        end
     end
 
     μ  = logmean(count)
@@ -48,7 +74,7 @@ function negativebinomial(count, depth)
     end
 
     return (
-        Θ₀ = Θ₀,
+        Θ₀         = Θ₀,
         likelihood = TwiceDifferentiable(loglikelihood, Θ₀; autodiff=:forward),
         constraint = TwiceDifferentiableConstraints([-∞,-∞,0],[+∞,+∞,+∞]),
         residual   = function(Θ)
@@ -56,12 +82,16 @@ function negativebinomial(count, depth)
             μ = @. exp(Θ₁ + Θ₂*depth)
             σ = @. √(μ + μ^2/Θ₃)
             z = @. (count - μ) / σ
-
             z[ z .< -5 ] .= -5
             z[ z .> +5 ] .= +5
-
-            return z
-        end
+        return z
+        end,
+        cumulative = function(Θ)
+            Θ₁,Θ₂,Θ₃ = Θ
+            μ = @. exp(Θ₁ + Θ₂*depth)
+            p = @. μ / (μ + Θ₃)
+        return @. 1 - incbeta(count+1, Θ₃, p)
+    end
     )
 end
 
@@ -107,12 +137,12 @@ function gamma(count, depth)
 end
 
 """
-    prior(params)
+    generalized_normal(params)
 
-Estimate a generalized normal distribution to `params` by maximum likelihood estimation.
+Compute the log likelihood of a generalized normal distribution with parameters `params`.
 In practice, used to compute the empirical prior for overdispersion factor `Θ₃` in the negative binomial.
 """
-function prior(params)
+function generalized_normal(params)
     objective = function(Θ)
         Θ₁, Θ₂, Θ₃ = Θ
         return sum(
@@ -122,13 +152,17 @@ function prior(params)
 
     Θ₁ = mean(params)
     Θ₂ = std(params)
-    Θ₀ = [Θ₁,Θ₂,2]
+    Θ₀ = [abs(Θ₁),abs(Θ₂),2] # XXX Might need to do something smarter here
 
-    likelihood = TwiceDifferentiable(f,Θ₀;autodiff=:forward)
-    constraint = TwiceDifferentiableConstraints([0,0,0],[+∞,+∞,+∞])
-    hyperparam = optimize(likelihood, constraint, Θ₀, IPNewton())
-
-    return Optim.minimizer(hyperparam)
+    return (
+        Θ₀         = Θ₀,
+        likelihood = TwiceDifferentiable(objective, Θ₀; autodiff=:forward),
+        constraint = TwiceDifferentiableConstraints([0,0,0],[+∞,+∞,+∞]),
+        cumulative = (Θ) -> let
+            Θ₁, Θ₂, Θ₃ = Θ
+            return @. .5*(1+sign(params-Θ₁)*incgamma((1/Θ₃), abs(params-Θ₁)/(Θ₂^Θ₃)))
+        end
+   )
 end
 
 """
@@ -159,15 +193,40 @@ const FitType = NamedTuple{
 Fit a generative model `stochastic` to gene expression `count` data, assuming confounding sequencing `depth`.
 `stochastic` can be either [`negativebinomial`](@ref) or [`gamma`](@ref).
 """
-function fit(stochastic, count, depth)
-    model = stochastic(count, depth)
+function fit(stochastic, count, depth; priors = nothing)
+    if isnothing(priors)
+        model = stochastic(count, depth)
+    else
+        model = stochastic(count, depth; Θ₃_priors = priors)
+    end
     param = optimize(model.likelihood, model.constraint, model.Θ₀, IPNewton())
 
     return (
         likelihood  = Optim.minimum(param),
         parameters  = Optim.minimizer(param),
         uncertainty = diag(inv(hessian!(model.likelihood, Optim.minimizer(param)))),
+        cumulative  = model.cumulative(Optim.minimizer(param)),
         residual    = model.residual(Optim.minimizer(param))
+    )
+end
+
+"""
+    fit_generalized_normal(params)
+
+Fit a generative model `generalized_normal` to `params`.
+In practice, used to compute the empirical prior for overdispersion factor `Θ₃` in the negative binomial.
+"""
+
+function fit_generalized_normal(params)
+    model = generalized_normal(params)
+    param = optimize(model.likelihood, model.constraint, model.Θ₀, IPNewton())
+
+    return (
+        likelihood  = Optim.minimum(param),
+        parameters  = Optim.minimizer(param),
+        uncertainty = diag(inv(hessian!(model.likelihood, Optim.minimizer(param)))),
+        cumulative  = model.cumulative(Optim.minimizer(param)),
+        # residual    = model.residual(Optim.minimizer(param)) # XXX: Residual for generalized_normal not implemented
     )
 end
 
@@ -179,7 +238,7 @@ One third of cells are removed and the parameters are re-estimated with the rema
 This process is repeated `samples` times.
 The resultant distribution of estimation is returned.
 """
-function bootstrap(count, depth; stochastic=negativebinomial, samples=50)
+function bootstrap(count, depth; stochastic=negativebinomial, priors = nothing, samples=50)
     N = length(depth)
 
     Θ₁ = Array{Float64}(undef,samples)
@@ -189,7 +248,7 @@ function bootstrap(count, depth; stochastic=negativebinomial, samples=50)
 
     for n in 1:samples
         ι = randperm(N)[1:2*N÷3]
-        f = fit(stochastic, count[ι],depth[ι])
+        f = fit(stochastic, count[ι], depth[ι]; priors=priors)
 
         δL[n] = f.likelihood
         Θ₁[n], Θ₂[n], Θ₃[n] = f.parameters
@@ -205,18 +264,30 @@ Fit a generalized linear model (GLM) to the matrix `data`.
 Genes are assumed to be on rows, cells over columns.
 The underlying generative model is passed by `stochastic`.
 """
-function glm(data; stochastic=negativebinomial, ϵ=1)
+function glm(data; stochastic=negativebinomial, priors = nothing, ϵ=1, run=(x)->true, barcolor = :red)
     average(x) = logmean(x; ϵ=ϵ)
     depth = map(eachcol(data)) do col
         col |> vec |> average
     end
 
-    fits = Array{NamedTuple}(undef,size(data,1))
+    selected = [i for (i, row) in enumerate(eachrow(data)) if run(row)]
+    ι = zeros(Int, size(data,1))
+    ι[selected] = 1:length(selected)
+
+    prog_lock = ReentrantLock() # for thread-safe progress bar
+    progress = Progress(sum(ι .!= 0); desc="--> fitting:", output=stderr, color = barcolor)
+
+    fits = Array{NamedTuple}(undef, length(selected))
     Threads.@threads for (i,gene) in collect(enumerate(eachrow(data)))
-        fits[i] = fit(stochastic,vec(gene),depth)
+        ι[i] == 0 && continue
+        fits[ι[i]] = fit(stochastic,vec(gene),depth; priors=priors)
+        lock(prog_lock) do
+            next!(progress)
+        end
     end
 
     return (
+        priors     = priors,
         likelihood = map((f)->f.likelihood,  fits),
         residual   = Matrix(reduce(hcat, map((f)->f.residual, fits))'),
 
@@ -227,7 +298,68 @@ function glm(data; stochastic=negativebinomial, ϵ=1)
         δΘ₁ = map((f)->f.uncertainty[1], fits),
         δΘ₂ = map((f)->f.uncertainty[2], fits),
         δΘ₃ = map((f)->f.uncertainty[3], fits),
+
+        cdf = map((f)->f.cumulative, fits),
     )
 end
 
+"""
+    normalize(data; δ=5)
+
+
+
+"""
+
+function normalize(data; δ = 5)
+    model = glm(data; stochastic=negativebinomial, ϵ=1, 
+                    run=(x) -> mean(x) > 1,
+                    barcolor = :blue
+                )
+
+    Θ₃_priors = fit_generalized_normal(log.(model.Θ₃)).parameters
+
+    println("Θ₃_priors (μ,σ,ν): ", Θ₃_priors)
+
+    model = glm(data; stochastic=negativebinomial, ϵ=1, barcolor = :red, priors = Θ₃_priors)
+
+    X̃, Σ, u², v² = let
+        Σ = data .* (data .+ model.Θ₃) ./ (1 .+ model.Θ₃)  
+        u², v², _ = Utility.sinkhorn(Σ)
+
+        (
+        Diagonal(.√u²) * data * Diagonal(.√v²),
+        Diagonal(u²) * Σ * Diagonal(v²),
+        u², v²
+        )
+    end
+
+    F = svd(X̃)
+    σ = F.S
+    R = count(σ .> (√size(X̃,1) + √size(X̃,2)) + δ)
+
+    X̃, ρ = let
+        nmf = nnmf(X̃, R; alg=:cd)
+        M̂ = nmf.W * nmf.H
+        (M̂, cor(M̂[:], X̃[:]))
+    end
+
+    X̂, u, v = let
+        u, v, _ = Utility.sinkhorn(X̃)
+        (Diagonal(u) * X̃ * Diagonal(v), u, v)
+    end
+
+    return (
+        counts   = scRNA.Count(X̂, data.gene, data.cell),
+        rank      = R,
+        corr      = ρ,
+        varnorm   = (row=u², col=v²),
+        scalenorm = (row=u,  col=v),
+        model  = model,
+    )
+
+end
+
+function TestReviseNormalize()
+    println("Testing Normalize.jl Revise; 1:46")
+end
 end
