@@ -5,7 +5,7 @@ using DelaunayTriangulation
 
 import ChainRulesCore: rrule, NoTangent
 
-export areas, rrule, voronoi_areas, sort_points_cw, corners_and_edges
+export areas, voronoi_areas, sort_points_cw, corners_and_edges
 
 # 2D cross product
 ∧(u, v) = u[1] * v[2] - u[2] * v[1]
@@ -58,7 +58,7 @@ function areas(x, boundary_corners=nothing)
     return s .* a
 end
 
-function rrule(::typeof(areas), x, boundary_corners)
+function ChainRulesCore.rrule(::typeof(areas), x, boundary_corners)
     q = isnothing(boundary_corners) || isempty(boundary_corners) ? x : hcat(boundary_corners, x)
     triangulation = PureDelaunayTri(hcat(unique(eachcol(q))...))
 
@@ -156,7 +156,7 @@ function volumes(x)
     return s.*Ω
 end
 
-function rrule(::typeof(volumes), x)
+function ChainRulesCore.rrule(::typeof(volumes), x)
     d = size(x,1)
     b = boundary_corners(d)
     q = hcat(b, x)
