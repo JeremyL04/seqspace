@@ -58,7 +58,7 @@ function areas(x, boundary_corners=nothing)
     return s .* a
 end
 
-function ChainRulesCore.rrule(::typeof(areas), x, boundary_corners)
+function rrule(::typeof(areas), x, boundary_corners)
     q = isnothing(boundary_corners) || isempty(boundary_corners) ? x : hcat(boundary_corners, x)
     triangulation = PureDelaunayTri(hcat(unique(eachcol(q))...))
 
@@ -156,7 +156,7 @@ function volumes(x)
     return s.*Ω
 end
 
-function ChainRulesCore.rrule(::typeof(volumes), x)
+function rrule(::typeof(volumes), x)
     d = size(x,1)
     b = boundary_corners(d)
     q = hcat(b, x)
