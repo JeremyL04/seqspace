@@ -6,7 +6,6 @@ using LinearAlgebra: norm, svd, Diagonal, dot, eigvals
 using Statistics: quantile, std
 using Flux, Zygote
 using ProgressMeter
-using DelaunayTriangulation
 
 import BSON
 
