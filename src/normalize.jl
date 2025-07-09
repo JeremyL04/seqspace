@@ -3,7 +3,7 @@ module Normalize
 using LinearAlgebra
 using Optim, NLSolversBase
 using Random, Statistics, StatsBase, NMF
-using SpecialFunctions: loggamma
+using SpecialFunctions: loggamma, erfinv, erf
 using GSL, ProgressMeter
 
 include("scrna.jl")
@@ -13,6 +13,7 @@ using .scRNA: Count
 incbeta(a,b,x) = GSL.sf_beta_inc(a,b,x)
 incgamma(a,x)  = GSL.sf_gamma_inc_P(a,x)
 
+export normalize
 
 const ∞ = Inf
 
@@ -90,18 +91,18 @@ function negativebinomial(count, depth; Θ̄₂=1, δΘ₂⁻²=5, Θ₃_priors 
             Θ₁,Θ₂,Θ₃ = Θ
             μ = @. exp(Θ₁ + Θ₂*depth)
             p = @. μ / (μ + Θ₃)
-        return @. 1 - incbeta(count+1, Θ₃, p)
+        return @. incbeta(count+1, Θ₃, p) # CDF of negative binomial
     end
     )
 end
 
 """
-    gamma(count, depth)
+    gamma_regression(count, depth)
 
-Compute the log likelihood of a gamma distributed generalized linear model (GLM) with log link function for the estimated mean `count` of a single gene.
+Compute the log likelihood of a gamma distributed generalized linear model (GLM) with log link function for the `count` of a single gene.
 The sequencing depth for each sequenced cell is assumed to be the only confounding variables.
 """
-function gamma(count, depth)
+function gamma_regression(count, depth)
     loglikelihood = function(Θ)
         Θ₁,Θ₂,Θ₃ = Θ
         return -sum(
@@ -132,10 +133,75 @@ function gamma(count, depth)
             z[ z .> +5 ] .= +5
 
             return z
+        end,
+        quantile = function(Θ)
+            Θ₁, Θ₂, Θ₃ = Θ
+            α  = @. Θ₃ * exp(Θ₁ + Θ₂*depth)
+            Φ  = @. incgamma(α, count*Θ₃)
+            ρ  = @. erfinv(clamp(2Φ - 1, -1, +1)) * √2
+            clamp!(ρ, -10, +10)
+            return ρ
+        end,
+        cumulative = function(Θ)
+            Θ₁, Θ₂, Θ₃ = Θ
+            α  = @. Θ₃ * exp(Θ₁ + Θ₂*depth)
+            return @. incgamma(α, count*Θ₃)
         end
     )
 end
 
+"""
+    gamma_pooled(count, overdispersion)
+
+Compute the log likelihood of a gamma distributed generalized linear model (GLM) with log link function for the estimated mean `count` of a single gene.
+The overdispersion factor `Θ₃` is assumed to be constant across all cells.
+"""
+
+function gamma_pooled(count)
+    loglikelihood = function(Θ)
+        logm, Θ₃ = Θ
+        m = @. exp(logm)
+        α = @. Θ₃ * m
+        return -sum(@. α*log(Θ₃) + (α - 1)*log(count + 0.001) - (Θ₃*count) - loggamma(α))
+    end
+
+    logm₀  = log(mean(count))
+    θ₃₀   = logvar(count)/(exp(logm₀) - 1)
+    init_params = [logm₀; θ₃₀]
+    if init_params[end] < 0 || isinf(init_params[end]) || isnan(init_params[end])
+        init_params[end] = 1
+    end
+
+    return (
+        init_params = init_params,
+        likelihood = TwiceDifferentiable(loglikelihood, init_params; autodiff=:forward),
+        constraint = TwiceDifferentiableConstraints([-Inf,0],[+Inf,+Inf]),
+        residual   = function(Θ)
+            logm, Θ₃ = Θ
+            μ = @. exp(logm)
+            σ = @. sqrt(μ / Θ₃)
+            z = @. (count - μ) / σ
+
+            z[ z .< -5 ] .= -5
+            z[ z .> +5 ] .= +5
+
+            return z
+        end,
+        quantile = function(Θ)
+            logm, Θ₃ = Θ
+            α  = @. Θ₃ * exp(logm)
+            Φ  = @. incgamma(α, count*Θ₃)
+            ρ  = @. erfinv(clamp(2Φ - 1, -1, +1)) * √2
+            clamp!(ρ, -10, +10)
+            return ρ
+        end,
+        cumulative = function(Θ)
+            logm, Θ₃ = Θ
+            α  = @. Θ₃ * exp(logm)
+            return @. incgamma(α, count*Θ₃)
+        end
+    )
+end
 """
     generalized_normal(params)
 
@@ -201,12 +267,19 @@ function fit(stochastic, count, depth; priors = nothing)
     end
     param = optimize(model.likelihood, model.constraint, model.Θ₀, IPNewton())
 
+    Θ̂ = Optim.minimizer(param)
+
     return (
         likelihood  = Optim.minimum(param),
-        parameters  = Optim.minimizer(param),
+        parameters  = Θ̂,
         uncertainty = diag(inv(hessian!(model.likelihood, Optim.minimizer(param)))),
-        cumulative  = model.cumulative(Optim.minimizer(param)),
-        residual    = model.residual(Optim.minimizer(param))
+        cumulative  = model.cumulative(Θ̂),
+        residual    = model.residual(Θ̂),
+        quantile = try 
+            model.quantile(Θ̂)
+        catch
+            nothing
+        end
     )
 end
 
@@ -226,8 +299,46 @@ function fit_generalized_normal(params)
         parameters  = Optim.minimizer(param),
         uncertainty = diag(inv(hessian!(model.likelihood, Optim.minimizer(param)))),
         cumulative  = model.cumulative(Optim.minimizer(param)),
-        # residual    = model.residual(Optim.minimizer(param)) # XXX: Residual for generalized_normal not implemented
     )
+end
+
+
+function fit_gamma_pooled(counts)
+    prog_lock = ReentrantLock()
+    progress = Progress(size(counts,1); desc="--> fitting:", output=stderr, color = :yellow)
+
+    fits = Vector{NamedTuple}(undef, size(counts, 1))
+
+    for (i, gene) in enumerate(eachrow(counts))
+        model = gamma_pooled(gene)
+        param = optimize(model.likelihood, model.constraint, model.init_params, IPNewton())
+
+        fits[i] = (
+            likelihood  = Optim.minimum(param),
+            parameters  = Optim.minimizer(param),
+            uncertainty = diag(inv(hessian!(model.likelihood, Optim.minimizer(param)))),
+            pearson_residual    = model.residual(Optim.minimizer(param)),
+            quantile_residual    = model.quantile(Optim.minimizer(param)),
+            cumulative  = model.cumulative(Optim.minimizer(param))
+        )
+
+        lock(prog_lock) do
+            next!(progress)
+        end
+    end
+        return (
+                likelihood          = map((f)->f.likelihood,  fits),
+                residual            = Matrix(reduce(hcat, map((f)->f.pearson_residual, fits))'),
+                quantile_residual   =  Matrix(reduce(hcat, map((f)->f.quantile_residual, fits))'),
+
+                logm    = map((f)->f.parameters[1],  fits),
+                Θ₃      = map((f)->f.parameters[2],  fits),
+
+                δlogm   = map((f)->f.uncertainty[1], fits),
+                δΘ₃   = map((f)->f.uncertainty[2], fits),
+                
+                cdf     = map((f)->f.cumulative, fits),
+            )
 end
 
 """
@@ -265,6 +376,7 @@ Genes are assumed to be on rows, cells over columns.
 The underlying generative model is passed by `stochastic`.
 """
 function glm(data; stochastic=negativebinomial, priors = nothing, ϵ=1, run=(x)->true, barcolor = :red)
+    # compute depth of each cell
     average(x) = logmean(x; ϵ=ϵ)
     depth = map(eachcol(data)) do col
         col |> vec |> average
@@ -290,7 +402,12 @@ function glm(data; stochastic=negativebinomial, priors = nothing, ϵ=1, run=(x)-
         priors     = priors,
         likelihood = map((f)->f.likelihood,  fits),
         residual   = Matrix(reduce(hcat, map((f)->f.residual, fits))'),
-
+        quantile = try 
+                    map((f)->f.quantile, fits) 
+                catch 
+                    @warn("$stochastic has no implemented quantile function")
+                    nothing 
+                end,
         Θ₁  = map((f)->f.parameters[1],  fits),
         Θ₂  = map((f)->f.parameters[2],  fits),
         Θ₃  = map((f)->f.parameters[3],  fits),
@@ -307,23 +424,14 @@ end
     normalize(data; δ=5)
 
 
-
 """
 
-function normalize(data; δ = 5)
-    model = glm(data; stochastic=negativebinomial, ϵ=1, 
-                    run=(x) -> mean(x) > 1,
-                    barcolor = :blue
-                )
+function normalize(data; δ = 2)
 
-    Θ₃_priors = fit_generalized_normal(log.(model.Θ₃)).parameters
-
-    println("Θ₃_priors (μ,σ,ν): ", Θ₃_priors)
-
-    model = glm(data; stochastic=negativebinomial, ϵ=1, barcolor = :red, priors = Θ₃_priors)
-
-    X̃, Σ, u², v² = let
-        Σ = data .* (data .+ model.Θ₃) ./ (1 .+ model.Θ₃)  
+    model = glm(data; stochastic=negativebinomial, ϵ=1, barcolor = :green)
+    
+    X̃₁, Σ, u², v² = let
+        Σ = data .* (data .+ model.Θ₃) ./ (1 .+ model.Θ₃)
         u², v², _ = Utility.sinkhorn(Σ)
 
         (
@@ -333,33 +441,32 @@ function normalize(data; δ = 5)
         )
     end
 
-    F = svd(X̃)
+    F = svd(X̃₁)
     σ = F.S
-    R = count(σ .> (√size(X̃,1) + √size(X̃,2)) + δ)
+    R = count(σ .> (√size(X̃₁,1) + √size(X̃₁,2)) + δ)
 
     X̃, ρ = let
-        nmf = nnmf(X̃, R; alg=:cd)
+        nmf = nnmf(X̃₁, R; alg=:cd, init = :nndsvdar)
         M̂ = nmf.W * nmf.H
-        (M̂, cor(M̂[:], X̃[:]))
+        (M̂, cor(M̂[:], X̃₁[:]))
     end
 
-    X̂, u, v = let
-        u, v, _ = Utility.sinkhorn(X̃)
-        (Diagonal(u) * X̃ * Diagonal(v), u, v)
-    end
+    gamma_fits = fit_gamma_pooled(X̃)
+    X̂ = gamma_fits.residual
 
     return (
-        counts   = scRNA.Count(X̂, data.gene, data.cell),
-        rank      = R,
-        corr      = ρ,
-        varnorm   = (row=u², col=v²),
-        scalenorm = (row=u,  col=v),
-        model  = model,
+        counts      = scRNA.Count(X̂, data.gene, data.cell),
+        rank        = R,
+        corr        = ρ,
+        gamma_models  = gamma_fits,
+        NB_models     = model,
+        iid_counts    = X̃₁,
+        NNMF_corr      = ρ
     )
-
+    
 end
 
 function TestReviseNormalize()
-    println("Testing Normalize.jl Revise; 1:46")
+    println("Testing Normalize.jl Revise; 8:56")
 end
 end

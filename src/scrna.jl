@@ -354,6 +354,11 @@ function filterbarcodes(seq::Count)
     return seq
 end
 
+"""
+    counts(dir::String, subdir::String; chatty = true)
+
+Load and filter scRNAseq data from `dir` and `subdir`.
+"""
 function counts(dir::String, subdir::String; chatty = true)
     # helper to wrap any filter + logging
     function filter_and_log(f, count, dim::Int, desc::AbstractString)
@@ -405,7 +410,7 @@ function counts(dir::String, subdir::String; chatty = true)
     # 5) remove low-count cells
     count = filter_and_log(count, 2, "cells low counts + high number of non-zero counts") do cnt
         scRNA.filtercell(cnt) do cell, _
-            (sum(cell) > 1e3 && sum(cell .> 1) > 20)
+            (sum(cell) > 1e4 && sum(cell .> 1) > 20)
         end
     end
 

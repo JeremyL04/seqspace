@@ -23,9 +23,10 @@ include("scrna.jl")
 include("voronoi.jl")
 include("util.jl")
 include("mle.jl")
+include("distance.jl")
 
 
-using .PointCloud, .DataIO, .SoftRank, .ML, .Voronoi, .Radon
+using .PointCloud, .DataIO, .SoftRank, .ML, .Voronoi, .Radon, .Normalize, .Inference
 
 export Result, HyperParams
 export linearprojection, fitmodel, extendfit
@@ -347,10 +348,10 @@ function buildloss(model, D², param)
             # Voronoi/Dulaney
 
             # # True Voronoi
-            ϵᵤ = let
-                N = size(z,2)
-                sum(abs.(voronoi_areas(z, boundary_points) .- (latent_area / Float32(N))))
-            end
+            # ϵᵤ = let
+            #     N = size(z,2)
+            #     sum(abs.(voronoi_areas(z, boundary_points) .- (latent_area / Float32(N))))
+            # end
 
             # # Dulaney Triangles
             # ϵᵤ = let
@@ -489,9 +490,6 @@ function fitmodel(
         log = log
     )
     Flux.testmode!(M)
-
-    #Reset the progress bar for re-training
-    # progress = Progress(Int(round(param.N/10)); desc=">training model (1% ≈ $(Int(round(param.N/10))) Epochs)", output=stderr)
     
     return Result(param, E, Info, M), (
         batch=batch,

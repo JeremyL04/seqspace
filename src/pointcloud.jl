@@ -487,7 +487,8 @@ end
 """
     scaling(D, N)
 
-Estimate the Hausdorff dimension by computing how the number of points contained within balls scales with varying radius.
+Estimate the Hausdorff dimension by computing how the number of points contained within balls scales with varying radius. N is the number of radii to test.
+Returns the matrix of counts `ϕ` and the radii `Rs`.
 """
 function scaling(D, N)
 	Rₘᵢₙ = minimum(D[D .> 0])

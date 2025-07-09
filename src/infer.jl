@@ -9,6 +9,8 @@ using .DataIO
 include("mixtures.jl")
 using .Mixtures
 
+export inversion, virtualembryo
+
 # ------------------------------------------------------------------------
 # globals
 
@@ -49,31 +51,41 @@ function cohortdatabase(stage::Int)
 end
 
 """
-    virtualembryo(;directory="/home/nolln/mnt/data/drosophila/dvex")
+    virtualembryo(;directory="")
 
 Load the Berkeley Drosophila Transcriptional Network Project database.
 `directory` should be path to folder containing two folders:
   1. bdtnp.txt.gz    : gene expression over point cloud of virtual cells
   2. geometry.txt.gz : spatial position (x,y,z) of point cloud of virtual cells.
 """
-function virtualembryo(;directory="/home/nolln/mnt/data/drosophila/dvex")
+function virtualembryo(;directory="/Users/jeremy/Desktop/Research/Positional Information/Drosophila_FISH_Data")
     expression, _, genes = GZip.open("$directory/bdtnp.txt.gz") do io
         read_matrix(io; named_cols=true)
     end
+
+    expression = collect(expression')
+    size(expression,1) == 84 || error("Expected 84 BDTNP genes genes")
 
     positions, _, _, = GZip.open("$directory/geometry_reduced.txt.gz") do io
         read_matrix(io; named_cols=true)
     end
 
+    badgenes = ["CG14427", "cenG1A", "CG13333", "CG31670", "CG8965", "HLHm5", "Traf1"]
+    mask = .!([g in badgenes for g in genes])
+    expression = expression[mask, :]
+    genes      = genes[mask]
+
     return (
         expression = (
             real = expression,
-            data = hcat(fitmixture.(eachcol(expression))...),
-            gene = columns(genes),
+            data = hcat(fitmixture.(eachcol(expression))...), # TODO: Figure out what this does
+            gene = genes,
         ),
-        position  = positions
+        position  = positions,
     )
 end
+
+
 
 function scrna()
     expression, genes, _ = GZip.open("$root/drosophila/dvex/dge_normalized.txt.gz") do io
@@ -86,13 +98,18 @@ function scrna()
     )
 end
 
-function match(x, y)
-    index = Array{String}(undef,length(x))
-    for (g,i) in x
-        index[i] = g
-    end
-    return [k ∈ keys(y) ? y[k] : nothing for k in index]
+function match(x,y)
+    dict = Dict(name => i for (i,name) in enumerate(y))
+    return [ get(dict, gene, nothing) for gene in x ]
 end
+
+# function match(x, y)
+#     index = Array{String}(undef,length(x))
+#     for (g,i) in x
+#         index[i] = g
+#     end
+#     return [k ∈ keys(y) ? y[k] : nothing for k in index]
+# end
 
 # ------------------------------------------------------------------------
 # main functions
@@ -237,26 +254,26 @@ end
 """
     cost_transform(ref, qry; ω=nothing, ν=nothing)
 
-Return the cost matrix ``J_{i\\alpha}`` associated to matching cells in `qry` to cells in `ref`.
+Return the cost matrix ``J_{i\\alpha}`` associated to matching cells in `qry` to cells in `ref`. Assumes `ref` and `qry` are genes \\cross cells.
 The cost matrix is computed by:
   1. Transforming the `qry` distribution to the `ref` distribution.
   2. Looking at the SSE across transformed genes.
 Use this unless you know what you are doing.
 """
 function cost_transform(ref, qry; ω=nothing, ν=nothing)
-    ϕ = match(ref.gene, qry.gene)
-    Σ = zeros(size(ref.data,1), size(qry.data,1))
+    ϕ = match(ref.gene,qry.gene)
+    Σ = zeros(size(ref.data,2), size(qry.data,2))
 
-    ω = isnothing(ω) ? ones(size(ref.real,2)) : ω
+    ω = isnothing(ω) ? ones(size(ref.real,1)) : ω
     ω = ω / sum(ω)
 
-    ν = isnothing(ν) ? ones(size(ref.real,2)) : ν
+    ν = isnothing(ν) ? ones(size(ref.real,1)) : ν
 
-    for i in 1:size(ref.data,2)
+    for i in 1:size(ref.data,1)
         isnothing(ϕ[i]) && continue
 
-        r = ref.real[:,i]
-        q = transform(qry.data[:,ϕ[i]], r, ν[i])
+        r = ref.real[i,:]
+        q = transform(qry.data[ϕ[i],:], r, ν[i])
 
         Σ += ω[i]*(reshape(r, length(r), 1) .- reshape(q, 1, length(q))).^2
     end
@@ -341,7 +358,7 @@ end
 """
     inversion(counts, genes; ν=nothing, ω=nothing, refdb=nothing)
 
-Infer the original position of scRNAseq data `counts` where genes, given by `genes` are arranged along rows.
+Infer the original position of scRNAseq data `counts` where genes are arranged along rows.
 The sampling probability over space is computed by regularized optimal transport by comparing to the Berkeley Drosophila Transcription Network Project database.
 The cost matrix is determined by summing over the 1D Wasserstein metric over all genes within the BDTNP databse.
 Returns the inversion as a function of inverse temperature.
@@ -349,27 +366,22 @@ Returns the inversion as a function of inverse temperature.
 function inversion(counts, genes; ν=nothing, ω=nothing, refdb=nothing)
     ref, pointcloud = refdb === nothing ? virtualembryo() : refdb
     qry = (
-        data = counts',
-        gene = columns(genes),
+        data = counts,
+        gene = genes,
     )
 
     Σ, ϕ =
         if isnothing(ν) || isnothing(ω)
-            # cost_simple(ref, qry)
             cost_transform(ref, qry)
         else
-            cost_scan(ref, qry, ν, ω)
+            cost_transform(ref, qry; ω=ω, ν=ν)
         end
-
-    ψ = sinkhorn(exp.(-(1 .+ 1.0*Σ)))
-    names = collect(keys(ref.gene))
-    indx  = collect(values(ref.gene))
 
     return (
         invert     = (β) -> sinkhorn(exp.(-(1 .+ β*Σ))),
         pointcloud = pointcloud,
         database   = (
-            data=ref.data',
+            data=ref.data,
             gene=ref.gene,
         ),
         match      = match,
@@ -385,22 +397,27 @@ var(x)   = cov(x,x)
 std(x)   = sqrt(abs(var(x)))
 cor(x,y) = cov(x,y) / (std(x) * std(y))
 
+"""
+    make_objective(ref, qry)
+
+Create an objective function for optimizing the hyperparameters of the projection matrix.
+"""
 function make_objective(ref, qry)
     function objective(Θ)
-        # β, ν, ω = #0.5, Θ[1:84], Θ[85:end] #ones(84)
-        # Σ, ϕ    = cost_scan(ref, qry, ν, ω)
-        β = 250
-        ν, ω = Θ[1:84], Θ[85:end]
+        β = 200 # Choice here is arbitary
+
+        N_genes = length(ref.gene)
+        ν, ω = Θ[1:N_genes], Θ[N_genes+1:end]
         Σ, ϕ = cost_transform(ref, qry; ω=ω, ν=ν)
 
         ψ  = sinkhorn(exp.(-(1 .+ β*Σ)))
         ψ *= minimum(size(ψ))
 
         ι   = findall(.!isnothing.(ϕ))
-        db  = ref.real[:,ι]
-        est = ψ*qry.data[:,ϕ[ι]]
+        db  = ref.real[ι,:]
+        est = qry.data[ϕ[ι],:]*ψ'
 
-        return 1-mean(cor(db[:,i], est[:,i]) for i in 1:size(db,2))
+        return 1-mean(cor(db[i,:], est[i,:]) for i in 1:size(db,1))
     end
 
     return objective
@@ -431,6 +448,25 @@ function scan_params(count, genes)
 
     return bboptimize(f,
                   SearchRange=[[(0.01, 10.0) for _ ∈ 1:84]; [(0.1, 2.0) for _ ∈ 1:84]],
+                  # SearchRange=[(0.01, 10.0) for _ ∈ 1:(2*84)],
+                  MaxFuncEvals=5000,
+                  # Method=:adaptive_de_rand_1_bin_radiuslimited,
+                  Method=:generating_set_search,
+                  TraceMode=:compact
+    ) #, Method=:dxnes, NThreads=Threads.nthreads(), )
+end
+
+"""
+    find_params(ref, qry)
+
+Find the optimal parameters for the cost matrix between `ref` and `qry`.
+The parameters are optimized by minimizing the correlation between the estimated and reference distributions.
+"""
+function find_params(ref, qry)
+    f = make_objective(ref,qry)
+
+    return bboptimize(f,
+                  SearchRange=[[(0.01, 10.0) for _ ∈ 1:83]; [(0.1, 2.0) for _ ∈ 1:83]],
                   # SearchRange=[(0.01, 10.0) for _ ∈ 1:(2*84)],
                   MaxFuncEvals=5000,
                   # Method=:adaptive_de_rand_1_bin_radiuslimited,
