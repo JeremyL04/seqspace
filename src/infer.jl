@@ -9,7 +9,7 @@ using .DataIO
 include("mixtures.jl")
 using .Mixtures
 
-export inversion, virtualembryo
+export inversion, virtualembryo, scrna
 
 # ------------------------------------------------------------------------
 # globals
@@ -87,15 +87,8 @@ end
 
 
 
-function scrna()
-    expression, genes, _ = GZip.open("$root/drosophila/dvex/dge_normalized.txt.gz") do io
-        read_matrix(io; named_cols=true, named_rows=true)
-    end
-
-    return (
-        data = expression',
-        gene = columns(genes),
-    )
+function scrna(;DIR = "/Users/jeremy/Desktop/Research/Positional Information/Single Cell Data")
+    return load(joinpath(DIR, "normalized_scrna.jld2"), "normalized_counts")
 end
 
 function match(x,y)

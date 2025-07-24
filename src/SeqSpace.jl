@@ -50,6 +50,7 @@ const square = Float32.([-1.0 -1.0 1.0 1.0; -1.0 1.0 1.0 -1.0])
         N  :: Int
         δ  :: Int
         η  :: Float64
+        λ  :: Float64
         B  :: Int
         V  :: Int
         k  :: Int
@@ -66,8 +67,9 @@ HyperParams is a collection of parameters that specify the network architecture 
 `N`  is the number of epochs to train against
 `δ`  is the number of epochs that will be sampled for logging
 `η`  is the learning rate
+`λ`  is the weight decay factor
 `B`  is the batch size
-`V`  is the number of points to partition for validation purposes, i.e. won't be training against
+`V`  is the number of batches to partition for validation purposes, i.e. won't be training against
 `k`  is the number of neighbors to use to estimate geodesics
 `γₓ` is the prefactor of distance soft rank loss
 `γᵤ` is the prefactor of uniform density loss
@@ -81,6 +83,7 @@ mutable struct HyperParams
     N  :: Int          # number of epochs to run
     δ  :: Int          # epoch subsample factor for logging
     η  :: Float64      # learning rate
+    λ  :: Float64      # weight decay factor
     B  :: Int          # batch size
     V  :: Int          # number of points to partition for validation
     k  :: Int          # number of neighbors to use to estimate geodesics
@@ -111,7 +114,7 @@ function cylinder²(x)
     return (c' .- c).^2 .+ (s' .- s).^2 .+ euclidean²(x[2:end,:])
 end
 
-HyperParams(; dₒ=2, Ws=Int[], BN=Int[], DO=Int[], N=200, δ=10, η=1e-3, B=64, V=1, k=12, γₓ=1, γᵤ=1e-1, g=euclidean²) = HyperParams(dₒ, Ws, BN, DO, N, δ, η, B, V, k, γₓ, γᵤ, g)
+HyperParams(; dₒ=2, Ws=Int[], BN=Int[], DO=Int[], N=200, δ=10, η=1e-3, λ = 0, B=64, V=1, k=12, γₓ=1, γᵤ=1e-1, g=euclidean²) = HyperParams(dₒ, Ws, BN, DO, N, δ, η, λ, B, V, k, γₓ, γᵤ, g)
 
 """
     struct Result
@@ -410,6 +413,19 @@ function linearprojection(x, d; Δ=1, Λ=nothing)
     )
 end
 
+function linear_projection(x, d; Δ=1, Λ=nothing)
+    μ = mean(x, dims=2)
+    X = x .- μ
+
+    Λ = isnothing(Λ) ? svd(X) : Λ
+
+    ι = (1:d) .+ Δ
+    
+    ψ = (Λ.U[:,ι])' * X
+    
+    return ψ
+end
+
 """
     fitmodel(data, param; D²=nothing, dev=true, interior_activation=elu, exterior_activation=tanh_fast)
 
@@ -420,14 +436,14 @@ If `dev` is true, function will print to `stdout` and values of compoents of the
 Returns a `Result` type.
 """
 function fitmodel(
-    data,
-    param;
-    D²=nothing,
-    dev=true,
-    interior_activation=celu,
-    exterior_activation=celu,
-    initial_activation=celu,
-)
+        data,
+        param;
+        D²=nothing,
+        dev=false,
+        interior_activation=celu,
+        exterior_activation=celu,
+        initial_activation=celu,
+    )
     D² = isnothing(D²) ? geodesics(data, param.k).^2 : D²
     if dev
         println(stderr, "done computing geodesics...")
@@ -485,21 +501,23 @@ function fitmodel(
     Flux.trainmode!(M)
     train!(M, batch.train, index.train, loss;
         η   = param.η,
+        λ   = param.λ,
         B   = param.B,
         N   = param.N,
         log = log
     )
     Flux.testmode!(M)
     
-    return Result(param, E, Info, M), (
-        batch=batch,
-        index=index,
-        D²=D²,
-        log=log,
-        initial_activation = initial_activation,
-        interior_activation = interior_activation,
-        exterior_activation = exterior_activation
-    )
+    return Result(param, E, Info, M),
+        ( # should probably be a datatype
+            batch=batch,
+            index=index,
+            D²=D²,
+            log=log,
+            initial_activation = initial_activation,
+            interior_activation = interior_activation,
+            exterior_activation = exterior_activation
+        )
 end
 
 """
@@ -511,7 +529,6 @@ Returns a new `Result`.
 function extendfit(result::Result, input, new_params; dev = false, data = nothing)
     loss_peices = buildloss(result.model, input.D², new_params)
     loss = (args...) -> dot((1, new_params.γₓ, new_params.γᵤ), loss_peices(args...))
-    data_loss = buildloss(result.model, input.D², new_params)
 
     progress = Progress(Int(round(new_params.N/10)); desc=">training model", output = stdout)
     log = (n) -> begin
@@ -519,9 +536,9 @@ function extendfit(result::Result, input, new_params; dev = false, data = nothin
             push!(result.loss.train, loss(input.batch.train, input.index.train, false))
             push!(result.loss.valid, loss(input.batch.valid, input.index.valid, false))
 
-            push!(result.info.𝕃ᵣ, data_loss(input.batch.train, input.index.train, false)[1])
-            push!(result.info.𝕃ₓ, data_loss(input.batch.train, input.index.train, false)[2])
-            push!(result.info.𝕃ᵤ, data_loss(input.batch.train, input.index.train, false)[3])
+            push!(result.info.𝕃ᵣ, loss_peices(input.batch.train, input.index.train, false)[1])
+            push!(result.info.𝕃ₓ, loss_peices(input.batch.train, input.index.train, false)[2])
+            push!(result.info.𝕃ᵤ, loss_peices(input.batch.train, input.index.train, false)[3])
         end
 
         if (n-1) % 10 == 0
@@ -546,10 +563,5 @@ function extendfit(result::Result, input, new_params; dev = false, data = nothin
 
     return Result(new_params, result.loss, result.info, result.model), input
 end
-
-function test_Revise_main(x)
-    return println("Testing 1.0")
-end
-
 
 end

@@ -85,7 +85,7 @@ end
 
 function iterate(it::LayerIterator, state)
     return if state.dropout
-               Dropout(0.5), (
+               Dropout(0.35), (
                    index     = state.index,
                    dropout   = false,
                    normalize = state.normalize,
@@ -238,13 +238,14 @@ Trains autoencoder `model` on `data` by minimizing `loss`.
 `index` stores the underlying indices of data used for training.
 Will mutate the underlying parameters of `model`.
 Optional parameters include:
-  1. `B` denotes the batch size to be used.
-  2. `N` denotes the number of epochs.
-  3. `η` denotes the learning rate.
+    1. `B` denotes the batch size to be used.
+    2. `N` denotes the number of epochs.
+    3. `η` denotes the learning rate.
+    4. `λ` denotes the weight decay factor.
 """
-function train!(model, data, index, loss; B=64, η=1e-3, N=100, log=noop)
-    Θ   = Flux.params(model.identity)
-    opt = NADAM(η)
+function train!(model, data, index, loss; layers_to_train = model.identity, B=64, η=1e-3, λ=0, N=100, log=noop)
+    Θ   = Flux.params(layers_to_train)
+    opt = AdamW(η, (0.9,0.999), λ)
 
     for n ∈ 1:N
         X, I = batch(data, B)
