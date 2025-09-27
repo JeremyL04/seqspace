@@ -324,12 +324,18 @@ function polygon_area(points::Vector{<:AbstractVector{Float32}})
 end
 
 function polygon_area(points::AbstractMatrix{Float32})
-    x = points[1, :]
-    y = points[2, :]
-    N = length(x)
-
-    area = 0.5f0 * sum(x .* y[[2:N; 1]] .- x[[2:N; 1]] .* y)
-    return area
+    @views x = points[1, :]
+    @views y = points[2, :]
+    N = size(points, 2)
+    if N < 3
+        return 0.0f0                      # zero area for empty/line polygons
+    end
+    s = 0.0f0
+    @inbounds for i in 1:N                # shoelace formula without risky indexing
+        j = (i == N) ? 1 : i + 1
+        s += x[i]*y[j] - x[j]*y[i]
+    end
+    return 0.5f0 * s                      # keep signed area (no abs), AD-friendly
 end
 
 """

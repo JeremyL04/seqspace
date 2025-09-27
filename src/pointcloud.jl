@@ -140,6 +140,25 @@ function neighborhood(x, k :: T; D=missing, accept=(d)->true) where T <: Integer
 end
 
 """
+    neighborhood(x, k :: T; D=missing, accept=(d)->true) where T <: Integer
+
+Constructs a neighborhood graph of the `k` nearest neighbor for each point of cloud `x`.
+If `D` is given, it is assumed to be a dense matrix of pairwise distances.
+"""
+function neighborhood(x, k :: T; D=missing, accept=(d)->true) where T <: Vector{<:Integer}
+    D = ismissing(D) ? euclidean(x) : D
+    G = Graph([Vertex(x[:,i]) for i ∈ axes(x,2)])
+    for i ∈ axes(D,1)
+        neighbor = sortperm(D[i,:])[2:end]
+        append!(G.edges, [Edge((i,j), D[i,j]) for j ∈ neighbor[1:k[i]] if accept(D[i,j])])
+    end
+
+    return G
+end
+
+
+
+"""
     neighborhood(x, r :: T; D=missing, accept=(d)->true) where T <: AbstractFloat
 
 Constructs a neighborhood graph of all neighbors within euclidean distance `r` for each point of cloud `x`.

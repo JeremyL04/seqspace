@@ -1,9 +1,10 @@
 module SeqSpace
 
 using GZip
-using BSON: @save
+using BSON: @save, @load
 using LinearAlgebra: norm, svd, Diagonal, dot, eigvals
 using Statistics: quantile, std
+import Statistics
 using Flux, Zygote
 using ProgressMeter
 using DelaunayTriangulation
@@ -30,8 +31,7 @@ using .PointCloud, .DataIO, .SoftRank, .ML, .Voronoi, .Radon, .Normalize, .Infer
 
 export Result, HyperParams
 export linearprojection, fitmodel, extendfit
-export marshal, unmarshal
-export version_info
+export build_transfer_model, train_transfer_model
 
 # ------------------------------------------------------------------------
 # globals
@@ -135,113 +135,6 @@ struct Result
     model
 end
 
-"""
-    marshal(r::Result)
-
-Serialize a trained autoencoder to binary format suitable for disk storage.
-Store parameters of model as contiguous array
-"""
-function marshal(TrainingOutput::Tuple{Result,Any}) 
-    r = TrainingOutput[1]
-    output = TrainingOutput[2]
-    # trainable parameters
-    ω₁ = r.model.pullback    |> cpu |> Flux.params |> collect
-    ω₂ = r.model.pushforward |> cpu |> Flux.params |> collect
-
-    # untrainables
-    β₁ = [ (μ=layer.μ,σ²=layer.σ²) for layer in r.model.pullback.layers    if isa(layer,Flux.BatchNorm) ]
-    β₂ = [ (μ=layer.μ,σ²=layer.σ²) for layer in r.model.pushforward.layers if isa(layer,Flux.BatchNorm) ]
-
-    return Result(r.param,r.loss,r.info,
-                    (
-                        pullback=(
-                            params=ω₁,
-                            batchs=β₁,
-                        ),
-                        pushforward=(
-                            params=ω₂,
-                            batchs=β₂,
-                        ),
-                        size=size(r.model.pullback.layers[1].weight,2)
-                    )
-                ),
-                (
-                batch=output.batch,
-                index=output.index,
-                D²=output.D²,
-                log=output.log,
-                initial_activation=output.initial_activation,
-                interior_activation=output.interior_activation,
-                exterior_activation=output.exterior_activation
-                )
-end
-
-"""
-    unmarshal(r::Result)
-
-Deserialize a trained autoencoder from binary format to semantic format.
-Represents model as a collection of functors.
-"""
-function unmarshal(MarshaledModel::Tuple{Result,Any}) # This needs to be re-worked with new data structures
-    r = MarshaledModel[1]
-    output = MarshaledModel[2]
-    autoencoder = model(r.model.size, r.param.dₒ;
-          Ws         = r.param.Ws,
-          normalizes = r.param.BN,
-          dropouts   = r.param.DO,
-          initial_activation = output.initial_activation,
-          interior_activation = output.interior_activation,
-          exterior_activation = output.exterior_activation
-    )
-
-    Flux.loadparams!(autoencoder.pullback, r.model.pullback.params)
-    Flux.loadparams!(autoencoder.pushforward, r.model.pushforward.params)
-    Flux.trainmode!(autoencoder.identity, false)
-
-    i = 1
-    for layer in autoencoder.pullback.layers
-        if isa(layer, Flux.BatchNorm)
-            layer.μ  = r.model.pullback.batchs[i].μ
-            layer.σ² = r.model.pullback.batchs[i].σ²
-            i += 1
-        end
-    end
-
-    i = 1
-    for layer in autoencoder.pushforward.layers
-        if isa(layer, Flux.BatchNorm)
-            layer.μ  = r.model.pushforward.batchs[i].μ
-            layer.σ² = r.model.pushforward.batchs[i].σ²
-            i += 1
-        end
-    end
-
-    param = HyperParams(;
-        dₒ = r.param.dₒ,
-        Ws = r.param.Ws,
-        BN = r.param.BN,
-        DO = r.param.DO,
-        N  = r.param.N,
-        δ  = r.param.δ,
-        η  = r.param.η,
-        B  = r.param.B,
-        V  = r.param.V,
-        k  = r.param.k,
-        γₓ = r.param.γₓ,
-        γᵤ = r.param.γᵤ,
-    )
-
-    return Result(param, r.loss, r.info, autoencoder),(
-        batch=output.batch,
-        index=output.index,
-        D²=output.D²,
-        log=output.log,
-        initial_activation=output.initial_activation,
-        interior_activation=output.interior_activation,
-        exterior_activation=output.exterior_activation
-    )
-end
-
 # ------------------------------------------------------------------------
 # utility functions
 
@@ -312,14 +205,15 @@ function buildloss(model, D², param)
     # Define constants for the uniform density loss outside of loss function so that they are not recomputed
     # Put a flag here to determine if latent activation has custom actiavation layers
     if propertynames(model.pullback[end]) == (:linear, :activations)
+        println("Detected custom activation layer in latent space...")
         Λ = 2*[model.pullback[end].activations[i](0) for i in 1:param.dₒ]
         boundary_points = Float32.(sort_points_cw(corners_and_edges(Λ)))
         latent_area = Float32.(prod(Λ))
     end
 
-    # ϕ = collect(0:0.01:π) .- 0.001
-    # ICDF_Splines = approximate_functions(ϕ, 0:0.01:1)
-    # Nₛ = 9
+    ϕ = collect(0:0.01:π) .- 0.001
+    ICDF_Splines = approximate_functions(ϕ, 0:0.01:1)
+    Nₛ = 9
 
 
     return function(x, i::T, output::Bool) where T <: AbstractArray{Int,1}
@@ -348,13 +242,19 @@ function buildloss(model, D², param)
         if param.γᵤ == 0
             ϵᵤ = 0
         else 
+            # Elipsoid penality
+            # a = 10
+            # b = 10
+            # c = 0.1
+            # ϵᵤ = sum(@. relu.(z[1,:]^2/a^2 + z[2,:]^2/b^2 + z[3,:]^2/c^2 - 1)^2)
+
             # Voronoi/Dulaney
 
-            # # True Voronoi
-            # ϵᵤ = let
-            #     N = size(z,2)
-            #     sum(abs.(voronoi_areas(z, boundary_points) .- (latent_area / Float32(N))))
-            # end
+            # True Voronoi
+            ϵᵤ = let
+                N = size(z,2)
+                sum(abs.(voronoi_areas(z, boundary_points) .- (latent_area / Float32(N))))
+            end
 
             # # Dulaney Triangles
             # ϵᵤ = let
@@ -363,12 +263,28 @@ function buildloss(model, D², param)
             #     sum(abs.(A .- (latent_area/N_triangles)))
             # end
 
+            # # Central Force Repulsion
+                # ϵᵤ = let
+                #     α = 10 ./ sqrt(latent_area/size(z,2))
+                #     Dz = SeqSpace.upper_tri(Dz²)
+                #     mean(exp.(-α*Dz))
+                # end
+
+                #     ϵ = 16*log(10)/(sqrt(latent_area/3039)) # 15log(10) chosen so l/2 is cutoff at 10^-8
+                #     mean(20*exp.(-ϵ*Dz)) # Constant to speed up convergence
+
+                # end
+
+        # print("\r ϵᵣ = $ϵᵣ, ϵₓ = $ϵₓ, ϵᵤ = $ϵᵤ")
+    
+
+
             # # Radon Slicing
             # ϵᵤ = let
             #     I = rand(1:length(ϕ), Nₛ)
             #     Θ, ICDFs = ϕ[I], ICDF_Splines[I]
-            #     z̃ = z
-            #     # z̃ = ((2 * [1/Λ[1] 0; 0 1/Λ[2]]) * z) .- 1
+            #     # z̃ = z
+            #     z̃ = ((2 * [1/Λ[1] 0; 0 1/Λ[2]]) * z) .- 1
             #     ψₚ = [[dot(point, [cos(θ), sin(θ)]) for point ∈ eachcol(z̃)] for θ ∈ Θ]
             #     Ranks = [softrank(ψ) for ψ ∈ ψₚ]
             #     Y = [(r .- minimum(r)) ./ (1 .- minimum(r)) for r ∈ Ranks]
@@ -400,7 +316,7 @@ function linearprojection(x, d; Δ=1, Λ=nothing)
 
     ι = (1:d) .+ Δ
     ψ = Diagonal(Λ.S[ι])*Λ.Vt[ι,:]
-    μ = mean(ψ, dims=2)
+    μ = Statistics.mean(ψ, dims=2)
 
     x₀ = (Δ > 0) ? Λ.U[:,1:Δ]*Diagonal(Λ.S[1:Δ])*Λ.Vt[1:Δ,:] : 0
 
@@ -411,19 +327,6 @@ function linearprojection(x, d; Δ=1, Λ=nothing)
         embed      = embed,
         projection = (ψ .- μ),
     )
-end
-
-function linear_projection(x, d; Δ=1, Λ=nothing)
-    μ = mean(x, dims=2)
-    X = x .- μ
-
-    Λ = isnothing(Λ) ? svd(X) : Λ
-
-    ι = (1:d) .+ Δ
-    
-    ψ = (Λ.U[:,ι])' * X
-    
-    return ψ
 end
 
 """
@@ -458,6 +361,7 @@ function fitmodel(
           exterior_activation = exterior_activation,
     )
 
+
     nvalid = size(data,2) - ((size(data,2)÷param.B)-param.V)*param.B
     batch, index = validate(data, nvalid)
 
@@ -479,7 +383,6 @@ function fitmodel(
         if (n-1) % param.δ == 0
             push!(E.train, loss(batch.train, index.train, false))
             push!(E.valid, loss(batch.valid, index.valid, false))
-            # print("\r ϵᵣ,ϵₓ,ϵᵤ = $(loss_peices(batch.train, index.train, false)); Epoch: $n")
 
             # if dev
             #     push!(Info.𝕃ᵣ, data_loss(batch.train, index.train, false)[1])
@@ -510,58 +413,123 @@ function fitmodel(
     
     return Result(param, E, Info, M),
         ( # should probably be a datatype
-            batch=batch,
-            index=index,
-            D²=D²,
-            log=log,
-            initial_activation = initial_activation,
+            batch   = batch,
+            index   = index,
+            D²      = D²,
+            # log     = log, # This makes BSON serialization fail becuase it's an anonymous function
+            initial_activation  = initial_activation,
             interior_activation = interior_activation,
             exterior_activation = exterior_activation
         )
 end
 
 """
-    extendfit(result::Result, input, epochs)
+    build_transfer_model(model, new_IO_dim)
 
-Retrain model within `result` on `input` data for `epochs` more iterations.
-Returns a new `Result`.
+Build a transfer model from an existing model `model` with a new input/output dimensionality `new_IO_dim`.
+The transfer model will have the same architecture as `model` except for the first and last layers, which will be replaced with new `Dense` layers that have the specified input/output dimensionality.
+Additionally, the transfer model will not have any dropout layers in the encoder and decoder.
+Returns a tuple containing the new model with pullback, pushforward, identity, and first_and_last layers.
 """
-function extendfit(result::Result, input, new_params; dev = false, data = nothing)
-    loss_peices = buildloss(result.model, input.D², new_params)
-    loss = (args...) -> dot((1, new_params.γₓ, new_params.γᵤ), loss_peices(args...))
 
-    progress = Progress(Int(round(new_params.N/10)); desc=">training model", output = stdout)
+function build_transfer_model(model, new_IO_dim)
+    F, F¯¹, 𝕀 = deepcopy(model)
+    ιᵢ = size(F[1].weight,1)
+    ιₒ = size(F¯¹[end].weight,2)
+
+    lᵢ = Dense(new_IO_dim, ιᵢ, F[1].σ)
+    lₒ = Dense(ιₒ, new_IO_dim, F¯¹[1].σ)
+
+    # We remove dropout layers from the encoder and decoder
+    encoder = Chain(lᵢ, [layer for layer in F[2:end] if !(typeof(layer) <: Dropout)]...)
+    # encoder = Chain(lᵢ, F[2:end]...)
+    decoder = Chain([layer for layer in F¯¹[1:end-1] if !(typeof(layer) <: Dropout)]..., lₒ)
+    # decoder = Chain(F¯¹[1:end-1]..., lₒ)
+    𝕀 = Chain(encoder, decoder)
+    transfer_layers = (lᵢ,lₒ)
+
+    return (
+        pullback = encoder,
+        pushforward = decoder,
+        identity = 𝕀
+    )
+end
+
+"""
+    train_transfer_model(result, data, Epochs; D²=nothing, new_hyperparams=nothing, dev=false)
+
+Train a transfer model based on the `result` of a previous training run.
+`data` is the new data to train against.
+`Epochs` is the number of epochs to train for.
+If `D²` is not provided, it will compute the geodesics from `data`.
+If `new_hyperparams` is provided, it will use those hyperparameters instead of the ones from `result`.
+If `dev` is true, it will record the pullback mapping of `data` each epoch.
+Returns a `Result` type with the trained model.
+"""
+
+function train_transfer_model(result, data, Epochs; D² = nothing, new_hyperparams = nothing, schedule = nothing, dev = false)
+    # Build the transfer model and initialize history
+    param = isnothing(new_hyperparams) ? result.param : new_hyperparams
+    model = build_transfer_model(result.model, size(data,1))
+
+        println("Completed building transfer model")
+
+    train_hist = copy(result.loss.train)
+    valid_hist = copy(result.loss.valid)
+    info_hist  = deepcopy(result.info)
+
+    # Batch the new data:
+    nvalid = size(data,2) - ((size(data,2)÷param.B)-param.V)*param.B
+    batch, index = validate(data, nvalid)
+
+    # Create loss function with new geodesics
+    D² = isnothing(D²) ? geodesics(data, param.k).^2 : D²
+    loss_peices = buildloss(model, D², param)
+    loss = (args...) -> dot((1, param.γₓ, param.γᵤ), loss_peices(args...))
+
+    # Initialize progress bar and logging function
+    progress = Progress(Int(round(0)); desc=">training model", output = stdout)
     log = (n) -> begin
-        if (n-1) % new_params.δ == 0
-            push!(result.loss.train, loss(input.batch.train, input.index.train, false))
-            push!(result.loss.valid, loss(input.batch.valid, input.index.valid, false))
-
-            push!(result.info.𝕃ᵣ, loss_peices(input.batch.train, input.index.train, false)[1])
-            push!(result.info.𝕃ₓ, loss_peices(input.batch.train, input.index.train, false)[2])
-            push!(result.info.𝕃ᵤ, loss_peices(input.batch.train, input.index.train, false)[3])
+        if (n-1) % param.δ == 0
+            push!(train_hist, loss(batch.train, index.train, false))
+            push!(valid_hist, loss(batch.valid, index.valid, false))
+            if dev
+                push!(info_hist.𝕃ᵣ, loss_peices(batch.train, index.train, false)[1])
+                push!(info_hist.𝕃ₓ, loss_peices(batch.train, index.train, false)[2])
+                push!(info_hist.𝕃ᵤ, loss_peices(batch.train, index.train, false)[3])
+            end
         end
 
         if (n-1) % 10 == 0
             next!(progress)
         end
-        
-        if dev
-            push!(result.info.history, result.model.pullback(data))
-        end
+
+        # if dev
+        #     push!(info_hist.history, model.pullback(data))
+        # end
         nothing
     end
 
-    Flux.trainmode!(result.model.identity, true)
-    train!(result.model, input.batch.train, input.index.train, loss; 
-        η   = result.param.η,
-        B   = result.param.B,
-        N   = new_params.N,
-        log = log
-    )
-    Flux.trainmode!(result.model.identity, false)
+    schedule = isnothing(schedule) ? [Epochs] : schedule
+    println("Training schedule: ", schedule)
+    
+    Flux.trainmode!(model)
+    for (i, epochs) ∈ enumerate(schedule)
+        progress = Progress(Int(round(epochs/10)); desc=">training model", output = stdout)
+        train!(model, batch.train, index.train, loss;
+            layers_to_train = (model.pullback[1:i], model.pushforward[end-(i-1):end]),
+            η   = param.η,
+            B   = param.B,
+            λ   = param.λ,
+            N   = epochs,
+            log = log,
+        )
+        println("Completed training for epoch group ", i)
+    end
 
+    Flux.testmode!(model)
 
-    return Result(new_params, result.loss, result.info, result.model), input
+    return Result(param, (train_hist, valid_hist), info_hist, model), (batch = batch, index = index)
 end
 
 end

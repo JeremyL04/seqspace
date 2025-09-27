@@ -130,8 +130,8 @@ The decoder layer is given the mirror symmetric architecture.
 """
 function model(dᵢ, dₒ; Ws=Int[], normalizes=Int[], dropouts=Int[], interior_activation=relu, exterior_activation=celu, initial_activation = relu)
     # check for obvious errors here
-    length(dropouts)   > 0 && length(Ws) < maximum(dropouts)   ≤ 0 && error("invalid dropout layer position")
-    length(normalizes) > 0 && length(Ws) < maximum(normalizes) ≤ 0 && error("invalid normalization layer position")
+    # length(dropouts)   > length(Ws) && length(Ws) < maximum(dropouts) || error("invalid dropout layer position")
+    # length(normalizes) > length(Ws) && length(Ws) < maximum(normalizes) || error("invalid normalization layer position")
     isa(exterior_activation, Vector{<:Function}) && (length(exterior_activation) != dₒ) ? error("invalid number of exterior activation functions") : nothing
 
     layers = LayerIterator(

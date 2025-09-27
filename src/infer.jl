@@ -9,7 +9,7 @@ using .DataIO
 include("mixtures.jl")
 using .Mixtures
 
-export inversion, virtualembryo, scrna
+export inversion, virtualembryo, scrna, match, find_params
 
 # ------------------------------------------------------------------------
 # globals
@@ -85,10 +85,25 @@ function virtualembryo(;directory="/Users/jeremy/Desktop/Research/Positional Inf
     )
 end
 
+#'/Users/jeremy/Desktop/Research/Positional Information/Single Cell Data/normalized_scrna_new_collected.jld2'
 
-
-function scrna(;DIR = "/Users/jeremy/Desktop/Research/Positional Information/Single Cell Data")
-    return load(joinpath(DIR, "normalized_scrna.jld2"), "normalized_counts")
+function scrna(;DIR = "/Users/jeremy/Desktop/Research/Positional Information/Single Cell Data", id = nothing)
+    if id == "SC2_CMP_BDTNP"
+        println("Using new dataset 2_final; R = 57")
+        return load(joinpath(DIR, "SC2_CMP_BDTNP.jld2"), "normalized_counts")
+    
+    elseif id == "new_dataset2_final"
+        println("Using new dataset 2_final; R = 30")
+        return load(joinpath(DIR, "normalized_scrna_new_dataset2_final.jld2"), "normalized_counts")
+    
+    elseif id == "new_dataset2_CMP"
+        println("Using new dataset 2_CMP; R = 11")
+        return load(joinpath(DIR, "normalized_scrna_new_dataset2_CMP.jld2"), "normalized_counts")
+    
+    
+    else
+        @error("Unknown dataset id: $id")
+    end
 end
 
 function match(x,y)
