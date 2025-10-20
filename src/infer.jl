@@ -89,26 +89,39 @@ end
 
 function scrna(;DIR = "/Users/jeremy/Desktop/Research/Positional Information/Single Cell Data", id = nothing)
     if id == "SC2_CMP_BDTNP"
-        println("Using new dataset 2_final; R = 57")
+        println("Using new dataset 2; R = 26")
         return load(joinpath(DIR, "SC2_CMP_BDTNP.jld2"), "normalized_counts")
-    
-    elseif id == "new_dataset2_final"
-        println("Using new dataset 2_final; R = 30")
-        return load(joinpath(DIR, "normalized_scrna_new_dataset2_final.jld2"), "normalized_counts")
-    
-    elseif id == "new_dataset2_CMP"
-        println("Using new dataset 2_CMP; R = 11")
-        return load(joinpath(DIR, "normalized_scrna_new_dataset2_CMP.jld2"), "normalized_counts")
-    
-    
+
+    elseif id == "SC2_NB_BDTNP"
+        println("Using new dataset 2; R = 37")
+        return load(joinpath(DIR, "SC2_NB_BDTNP.jld2"), "normalized_counts")
+
+    elseif id == "SC1_NB"
+            println("Using new dataset 1; R = 25")
+            return load(joinpath(DIR, "SC1_NB.jld2"), "normalized_counts")
+
+    elseif id == "SC2_NB_CMP"
+        println("Using new dataset 2; R = 43")
+        return load(joinpath(DIR, "SC2_NB_CMP.jld2"), "normalized_counts")
+
     else
         @error("Unknown dataset id: $id")
     end
 end
 
-function match(x,y)
-    dict = Dict(name => i for (i,name) in enumerate(y))
-    return [ get(dict, gene, nothing) for gene in x ]
+function match(x, y; exclude=nothing)
+    dict = Dict(name => i for (i, name) in pairs(y))
+    common = [get(dict, g, nothing) for g in x]
+    if exclude !== nothing
+        nn = filter(!isnothing, common)
+        for g in exclude
+            i = findfirst(==(nn[g]), common)
+            if i !== nothing
+                common[i] = nothing
+            end
+        end
+    end
+    common
 end
 
 # function match(x, y)
@@ -268,8 +281,8 @@ The cost matrix is computed by:
   2. Looking at the SSE across transformed genes.
 Use this unless you know what you are doing.
 """
-function cost_transform(ref, qry; ω=nothing, ν=nothing)
-    ϕ = match(ref.gene,qry.gene)
+function cost_transform(ref, qry; ω=nothing, ν=nothing, exclude=nothing)
+    ϕ = match(ref.gene,qry.gene; exclude=exclude)
     Σ = zeros(size(ref.data,2), size(qry.data,2))
 
     ω = isnothing(ω) ? ones(size(ref.real,1)) : ω
@@ -371,7 +384,7 @@ The sampling probability over space is computed by regularized optimal transport
 The cost matrix is determined by summing over the 1D Wasserstein metric over all genes within the BDTNP databse.
 Returns the inversion as a function of inverse temperature.
 """
-function inversion(counts, genes; ν=nothing, ω=nothing, refdb=nothing)
+function inversion(counts, genes; ν=nothing, ω=nothing, refdb=nothing, exclude=nothing)
     ref, pointcloud = refdb === nothing ? virtualembryo() : refdb
     qry = (
         data = counts,
@@ -380,9 +393,9 @@ function inversion(counts, genes; ν=nothing, ω=nothing, refdb=nothing)
 
     Σ, ϕ =
         if isnothing(ν) || isnothing(ω)
-            cost_transform(ref, qry)
+            cost_transform(ref, qry; exclude=exclude)
         else
-            cost_transform(ref, qry; ω=ω, ν=ν)
+            cost_transform(ref, qry; ω=ω, ν=ν, exclude=exclude)
         end
 
     return (
@@ -481,6 +494,10 @@ function find_params(ref, qry)
                   Method=:generating_set_search,
                   TraceMode=:compact
     ) #, Method=:dxnes, NThreads=Threads.nthreads(), )
+end
+
+function test_revise()
+    return "the test is still good"
 end
 
 end
