@@ -321,8 +321,9 @@ function negativebinomial(count, depth; Θ̄₂=1, δΘ₂⁻²=0, Θ₃_priors 
             ρ = similar(μ)
             @inbounds for i in eachindex(μ)
                 y = Int(count[i])
-                pi = μ[i] / (μ[i] + Θ₃)
-                F_lo = (y == 0) ? 0.0 : incbeta(y, Θ₃, pi)
+                p = Θ₃ / (μ[i] + Θ₃)  # NOT μ/(μ+Θ₃)!
+                F_lo = (y == 0) ? 0.0 : incbeta(Θ₃, y, p)
+        
 
                 log_py = loggamma(y + Θ₃) - loggamma(Θ₃) - loggamma(y+1) + y*log(μ[i]) + Θ₃*log(Θ₃) - (y + Θ₃)*log(μ[i] + Θ₃)
                 p_y = exp(log_py)
@@ -336,10 +337,10 @@ function negativebinomial(count, depth; Θ̄₂=1, δΘ₂⁻²=0, Θ₃_priors 
             return ρ
         end,
         cumulative = function(Θ)
-            Θ₁,Θ₂,Θ₃ = Θ
+            Θ₁, Θ₂, Θ₃ = Θ
             μ = @. exp(Θ₁ + Θ₂*depth)
-            p = @. μ / (μ + Θ₃)
-            return @. incbeta(count+1, Θ₃, p)
+            p = @. Θ₃ / (μ + Θ₃)  # FIX 1: Use failure prob
+            return @. incbeta(Θ₃, count+1, p)
         end
     )
 end
@@ -526,7 +527,6 @@ function generalizedpoisson(count, depth; Θ̄₂=1, δΘ₂⁻²=0, Θ₃_prior
     end
     gp_cdf = function(y::Int, μ::Float64, θ::Float64)
         y < 0 && return 0.0
-        # P(0)
         logPk = -μ
         S = exp(logPk)
         @inbounds for k in 0:(y-1)
@@ -539,15 +539,28 @@ function generalizedpoisson(count, depth; Θ̄₂=1, δΘ₂⁻²=0, Θ₃_prior
         return clamp(S, 1e-15, 1-1e-15)
     end
 
+    # ---- threaded log-likelihood (mirrors your NB style) ----
     if isnothing(Θ₃_priors)
         loglikelihood = function(Θ)
             Θ₁, Θ₂, θ = Θ
             abs(θ) ≥ 1-1e-6 && return Inf
-            s = 0.0
-            @inbounds for (n,d) in zip(count, depth)
+            nt  = Base.Threads.nthreads()
+            acc = fill(zero(Θ₁), nt)
+            bad = falses(nt)
+            Base.Threads.@threads for i in eachindex(count)
+                n = count[i]; d = depth[i]
+                tid = Base.Threads.threadid()
                 μ = exp(Θ₁ + Θ₂*d)
-                (μ <= 0 || μ + θ*n <= 0) && return Inf
-                s += gp_logpmf(n, μ, θ)
+                if (μ <= 0) | (μ + θ*n <= 0)
+                    bad[tid] = true
+                else
+                    acc[tid] += gp_logpmf(n, μ, θ)
+                end
+            end
+            any(bad) && return Inf
+            s = zero(Θ₁)
+            @inbounds for j in 1:nt
+                s += acc[j]
             end
             return -s + 0.5*δΘ₂⁻²*(Θ₂-Θ̄₂)^2
         end
@@ -556,11 +569,23 @@ function generalizedpoisson(count, depth; Θ̄₂=1, δΘ₂⁻²=0, Θ₃_prior
         loglikelihood = function(Θ)
             Θ₁, Θ₂, θ = Θ
             abs(θ) ≥ 1-1e-6 && return Inf
-            s = 0.0
-            @inbounds for (n,d) in zip(count, depth)
+            nt  = Base.Threads.nthreads()
+            acc = fill(zero(Θ₁), nt)
+            bad = falses(nt)
+            Base.Threads.@threads for i in eachindex(count)
+                n = count[i]; d = depth[i]
+                tid = Base.Threads.threadid()
                 μ = exp(Θ₁ + Θ₂*d)
-                (μ <= 0 || μ + θ*n <= 0) && return Inf
-                s += gp_logpmf(n, μ, θ)
+                if (μ <= 0) | (μ + θ*n <= 0)
+                    bad[tid] = true
+                else
+                    acc[tid] += gp_logpmf(n, μ, θ)
+                end
+            end
+            any(bad) && return Inf
+            s = zero(Θ₁)
+            @inbounds for j in 1:nt
+                s += acc[j]
             end
             return -s + 0.5*δΘ₂⁻²*(Θ₂-Θ̄₂)^2 + (abs(atanh(θ) - μp)/σp)^νp
         end
@@ -571,7 +596,9 @@ function generalizedpoisson(count, depth; Θ̄₂=1, δΘ₂⁻²=0, Θ₃_prior
     θ0 = clamp(v̂ > 0 ? 1 - sqrt(clamp(μ̂/v̂, 1e-12, 1e12)) : 0.0, -0.9, 0.9)
     μ0 = max(μ̂*(1-θ0), 1e-6)
     Θ₀ = [log(μ0), 1.0, θ0]
-    if any(!isfinite, Θ₀); Θ₀ .= (Θ₀ .== Θ₀) ? Θ₀ : [log(max(μ̂,1e-6)), 1.0, 0.0]; end
+    if any(!isfinite, Θ₀)
+        Θ₀ = [log(max(μ̂,1e-6)), 1.0, 0.0]
+    end
 
     return (
         Θ₀         = Θ₀,
@@ -592,8 +619,7 @@ function generalizedpoisson(count, depth; Θ̄₂=1, δΘ₂⁻²=0, Θ₃_prior
             ρ = similar(μ)
             @inbounds for i in eachindex(μ)
                 yi   = Int(count[i])
-                # same cdf and pmf as above:
-                Fi_lo = gp_cdf(yi-1, μ[i], θ)                 # F(y-1)
+                Fi_lo = gp_cdf(yi-1, μ[i], θ)  # F(y-1)
                 pi    = exp( yi==0 ? -μ[i] :
                             log(μ[i]) + (yi-1)*log(μ[i] + θ*yi) - loggamma(yi+1) - (μ[i] + θ*yi) )
                 Fi    = clamp(Fi_lo + rand()*pi, 1e-15, 1-1e-15)
@@ -610,6 +636,7 @@ function generalizedpoisson(count, depth; Θ̄₂=1, δΘ₂⁻²=0, Θ₃_prior
 end
 
 
+
 """
     CMPoisson(count, depth; Θ̄₂=1, δΘ₂⁻²=0, Θ₃_priors=nothing)
 
@@ -623,501 +650,6 @@ a penalty (abs(log(Θ₃) - μ)/σ)^κ is added (log–scale prior on ν).
 
 Dunn–Smyth randomized quantile residuals are provided.
 """
-
-function Hurdle_CMPoisson(count, depth; Θ̄₂=1, δΘ₂⁻²=0, Θ₃_priors=nothing, Θ̄₄=:auto, δΘ₄⁻²=1e-3)  # gentle prior on Θ₄ (ψ)
-
-    @assert length(count) == length(depth)
-    c = collect(count); d = collect(depth); N = length(c)
-
-    # maps
-    @inline _ν_from_ρ(ρ::T) where {T} = exp(-ρ)           # ν = e^{-ρ} > 0
-    @inline _κ_from_ρ(ρ::T) where {T} = exp(ρ)            # κ = 1/ν
-    @inline _σ(x::T) where {T} = inv(one(T) + exp(-x))    # logistic
-    @inline _lse(a::T,b::T) where {T} = (m=max(a,b); m + log1p(exp(min(a,b)-m)))
-
-    # --- log Z(λ,ν) ---
-    @inline function _logZ(λ::T, ν::T; Kmax::Int=50_000, rtol::T=oftype(λ, eps(Float64)*100)) where {T}
-        if !(λ > zero(T)) || !(ν > zero(T)); return zero(T) end
-        logλ = log(λ); logS = zero(T); k = 0
-        @inbounds while k < Kmax
-            k += 1
-            ak = T(k)*logλ - ν*loggamma(T(k) + one(T))
-            logS = (ak > logS) ? ak + log1p(exp(logS - ak)) : logS + log1p(exp(ak - logS))
-            if (ak - logS) < log(rtol); break; end
-        end
-        return logS
-    end
-
-    # --- single pass sums for CDF/partial (CMP part) ---
-    @inline function _sumZ_and_partial(y::Int, λ::T, ν::T; Kmax::Int=1_000, tol::T=oftype(λ, eps(Float64)*100)) where {T}
-        s = one(T); term = one(T); k = 0; s_y = (y >= 0) ? one(T) : zero(T)
-        @inbounds while k < Kmax
-            k += 1
-            term *= λ * exp(-ν * log(float(k)))
-            s    += term
-            if k == y; s_y = s; end
-            if abs(term) ≤ max(tol, tol*abs(s)); break; end
-        end
-        return s, s_y
-    end
-
-    # loggamma cache
-    int_counts = eltype(c) <: Integer && all(x -> x ≥ 0, c)
-    lg_cache = if int_counts
-        maxy = maximum(c); v = Vector{Float64}(undef, maxy + 1)
-        @inbounds @simd for k in 1:length(v); v[k] = loggamma(k); end; v
-    else
-        Float64[]
-    end
-    @inline get_lg(n::Int) = int_counts ? @inbounds(lg_cache[n+1]) : loggamma(n+1)
-
-    # --- weak prior center for ψ (Θ₄) -----------------------------------------
-    zfrac_emp = mean(c .== 0)
-    p0_emp    = clamp(zfrac_emp, 1e-6, 1 - 1e-6)
-    ψ0_emp    = log(p0_emp/(1 - p0_emp))
-    ψ̄_prior  = (Θ̄₄ === :auto) ? ψ0_emp : Float64(Θ̄₄)
-
-    # --- log-likelihood (Hurdle–CMP) ------------------------------------------
-    loglikelihood =
-        if isnothing(Θ₃_priors)
-            function (Θ::AbstractVector{T}) where {T}
-                Θ₁, Θ₂, ρ, ψ = Θ
-                ν = _ν_from_ρ(ρ); p = _σ(ψ)
-                s_local = zeros(T, Threads.nthreads())
-                if eltype(Θ) <: Real
-                    Threads.@threads for i in 1:N
-                        n = c[i]; di = d[i]
-                        logλ = Θ₁ + Θ₂*di; λ = exp(logλ)
-                        logZ = _logZ(λ, ν)
-                        log1m_p0 = log1p(-exp(-logZ))      # log(1 - 1/Z)
-                        if n == 0
-                            s_local[Threads.threadid()] += log(p)
-                        else
-                            s_local[Threads.threadid()] += log1p(-p) + n*logλ - ν*get_lg(Int(n)) - logZ - log1m_p0
-                        end
-                    end
-                    s = zero(T); @inbounds @simd for t in 1:length(s_local); s += s_local[t]; end
-                else
-                    s = zero(T)
-                    @inbounds @simd for i in 1:N
-                        n = c[i]; di = d[i]
-                        logλ = Θ₁ + Θ₂*di; λ = exp(logλ)
-                        logZ = _logZ(λ, ν)
-                        log1m_p0 = log1p(-exp(-logZ))
-                        if n == 0
-                            s += log(p)
-                        else
-                            s += log1p(-p) + n*logλ - ν*get_lg(Int(n)) - logZ - log1m_p0
-                        end
-                    end
-                end
-                reg2 = (T(0.5)*T(δΘ₂⁻²))*(Θ₂ - T(Θ̄₂))^2
-                reg4 = (T(0.5)*T(δΘ₄⁻²))*(ψ  - T(ψ̄_prior))^2   # gentle prior on Θ₄
-                return -(s) + reg2 + reg4
-            end
-        else
-            μ, σ, νp = Θ₃_priors   # prior on log ν (= -ρ) as before
-            function (Θ::AbstractVector{T}) where {T}
-                Θ₁, Θ₂, ρ, ψ = Θ
-                ν = _ν_from_ρ(ρ); p = _σ(ψ)
-                s_local = zeros(T, Threads.nthreads())
-                if eltype(Θ) <: Real
-                    Threads.@threads for i in 1:N
-                        n = c[i]; di = d[i]
-                        logλ = Θ₁ + Θ₂*di; λ = exp(logλ)
-                        logZ = _logZ(λ, ν)
-                        log1m_p0 = log1p(-exp(-logZ))
-                        if n == 0
-                            s_local[Threads.threadid()] += log(p)
-                        else
-                            s_local[Threads.threadid()] += log1p(-p) + n*logλ - ν*get_lg(Int(n)) - logZ - log1m_p0
-                        end
-                    end
-                    s = zero(T); @inbounds @simd for t in 1:length(s_local); s += s_local[t]; end
-                else
-                    s = zero(T)
-                    @inbounds @simd for i in 1:N
-                        n = c[i]; di = d[i]
-                        logλ = Θ₁ + Θ₂*di; λ = exp(logλ)
-                        logZ = _logZ(λ, ν)
-                        log1m_p0 = log1p(-exp(-logZ))
-                        if n == 0
-                            s += log(p)
-                        else
-                            s += log1p(-p) + n*logλ - ν*get_lg(Int(n)) - logZ - log1m_p0
-                        end
-                    end
-                end
-                reg2 = (T(0.5)*T(δΘ₂⁻²))*(Θ₂ - T(Θ̄₂))^2
-                pen3 = (abs(log(ν) - T(μ))/T(σ))^T(νp)          # your ν prior
-                reg4 = (T(0.5)*T(δΘ₄⁻²))*(ψ  - T(ψ̄_prior))^2   # gentle prior on Θ₄
-                return -(s) + reg2 + pen3 + reg4
-            end
-        end
-
-    # --- initializer (ρ₀=0 ⇒ ν₀=1; ψ from empirical zeros) --------------------
-    μ̄ = logmean(c)
-    ψ0 = ψ0_emp
-    Θ₀ = [log(μ̄), 1.0, 0.0, ψ0]
-
-    # --- residuals (CMP asymptotics for μ,σ²; exact p0 via logZ) --------------
-    residual = function (Θ::AbstractVector{T}) where {T}
-        Θ₁, Θ₂, ρ, ψ = Θ
-        ν    = _ν_from_ρ(ρ)
-        invν = _κ_from_ρ(ρ)
-        p    = _σ(ψ)
-        half = T(0.5)
-        out  = Vector{T}(undef, N)
-        if eltype(Θ) <: Real
-            Threads.@threads for i in 1:N
-                logλ = Θ₁ + Θ₂*d[i]; λ = exp(logλ)
-                λν   = exp(logλ * invν)                 # CMP mean approx
-                μcmp = λν + (inv(T(2)*ν) - half)
-                σ2cmp= max(invν * λν, oftype(logλ, eps(Float64)))
-                p0cmp= exp(-_logZ(λ, ν))                # exact p0 = 1/Z
-                one_m_p0 = max(1 - p0cmp, oftype(logλ, 1e-12))
-                μplus = μcmp / one_m_p0
-                σ2plus = ((one_m_p0)*σ2cmp - p0cmp*μcmp*μcmp) / (one_m_p0*one_m_p0)
-                μh   = (one(T) - p)*μplus
-                σ2h  = (one(T) - p)*(σ2plus + p*μplus*μplus)
-                z    = (c[i] - μh) / sqrt(max(σ2h, oftype(logλ, eps(Float64))))
-                @inbounds out[i] = clamp(z, -T(5), T(5))
-            end
-        else
-            @inbounds @simd for i in 1:N
-                logλ = Θ₁ + Θ₂*d[i]; λ = exp(logλ)
-                λν   = exp(logλ * invν)
-                μcmp = λν + (inv(T(2)*ν) - half)
-                σ2cmp= max(invν * λν, oftype(logλ, eps(Float64)))
-                p0cmp= exp(-_logZ(λ, ν))
-                one_m_p0 = max(1 - p0cmp, oftype(logλ, 1e-12))
-                μplus = μcmp / one_m_p0
-                σ2plus = ((one_m_p0)*σ2cmp - p0cmp*μcmp*μcmp) / (one_m_p0*one_m_p0)
-                μh   = (one(T) - p)*μplus
-                σ2h  = (one(T) - p)*(σ2plus + p*μplus*μplus)
-                z    = (c[i] - μh) / sqrt(max(σ2h, oftype(logλ, eps(Float64))))
-                out[i] = clamp(z, -T(5), T(5))
-            end
-        end
-        return out
-    end
-
-    # --- randomized normal scores (Hurdle–CMP) --------------------------------
-    quantile = function (Θ)
-        Θ₁, Θ₂, ρ, ψ = Θ
-        ν = _ν_from_ρ(ρ); p = _σ(ψ)
-        qv = Vector{Float64}(undef, N)
-        if eltype(Θ) <: Real
-            Threads.@threads for i in 1:N
-                y    = Int(c[i]); logλ = Θ₁ + Θ₂*d[i]; λ = exp(logλ)
-                S, S_yminus = _sumZ_and_partial(max(y-1, 0), λ, ν)
-                invZ = inv(S); p0cmp = invZ
-                if y == 0
-                    Fi = clamp(rand()*p, 1e-15, 1-1e-15)
-                else
-                    pycmp = exp(y*logλ - ν*get_lg(y)) * invZ
-                    Flo   = p + (1 - p) * ((S_yminus*invZ - p0cmp) / max(1 - p0cmp, 1e-12))
-                    mass  = (1 - p) * (pycmp / max(1 - p0cmp, 1e-12))
-                    Fi    = clamp(Flo + rand()*mass, 1e-15, 1-1e-15)
-                end
-                @inbounds qv[i] = sqrt(2) * erfinv(2*Fi - 1)
-            end
-        else
-            @inbounds for i in 1:N
-                y    = Int(c[i]); logλ = Θ₁ + Θ₂*d[i]; λ = exp(logλ)
-                S, S_yminus = _sumZ_and_partial(max(y-1, 0), λ, ν)
-                invZ = inv(S); p0cmp = invZ
-                if y == 0
-                    Fi = clamp(rand()*p, 1e-15, 1-1e-15)
-                else
-                    pycmp = exp(y*logλ - ν*get_lg(y)) * invZ
-                    Flo   = p + (1 - p) * ((S_yminus*invZ - p0cmp) / max(1 - p0cmp, 1e-12))
-                    mass  = (1 - p) * (pycmp / max(1 - p0cmp, 1e-12))
-                    Fi    = clamp(Flo + rand()*mass, 1e-15, 1-1e-15)
-                end
-                qv[i] = sqrt(2) * erfinv(2*Fi - 1)
-            end
-        end
-        clamp!(qv, -10.0, 10.0)
-        return qv
-    end
-
-    # --- CDF at observed counts (Hurdle–CMP) ----------------------------------
-    cumulative = function (Θ)
-        Θ₁, Θ₂, ρ, ψ = Θ
-        ν = _ν_from_ρ(ρ); p = _σ(ψ)
-        cdf = Vector{Float64}(undef, N)
-        if eltype(Θ) <: Real
-            Threads.@threads for i in 1:N
-                y = Int(c[i]); λ = exp(Θ₁ + Θ₂*d[i])
-                S, S_y = _sumZ_and_partial(y, λ, ν)
-                invZ = inv(S); p0cmp = invZ
-                if y == 0
-                    @inbounds cdf[i] = p
-                else
-                    @inbounds cdf[i] = p + (1 - p) * ((S_y*invZ - p0cmp) / max(1 - p0cmp, 1e-12))
-                end
-            end
-        else
-            @inbounds @simd for i in 1:N
-                y = Int(c[i]); λ = exp(Θ₁ + Θ₂*d[i])
-                S, S_y = _sumZ_and_partial(y, λ, ν)
-                invZ = inv(S); p0cmp = invZ
-                cdf[i] = (y == 0) ? p :
-                         p + (1 - p) * ((S_y*invZ - p0cmp) / max(1 - p0cmp, 1e-12))
-            end
-        end
-        return cdf
-    end
-
-    return (
-        Θ₀         = Θ₀,
-        likelihood = TwiceDifferentiable(loglikelihood, Θ₀; autodiff=:forward),
-        constraint = TwiceDifferentiableConstraints([-∞,-∞,-∞,-∞],[+∞,+∞,+∞,+∞]),
-        residual   = residual,
-        quantile   = quantile,
-        cumulative = cumulative
-    )
-end
-
-
-function ZI_CMPoisson(count, depth; Θ̄₂=1, δΘ₂⁻²=0, Θ₃_priors=nothing) # ZI–CMP (log param for ν, logit param for p)
-    @assert length(count) == length(depth)
-    c = collect(count); d = collect(depth); N = length(c)
-
-    # maps for dispersion and zero-inflation
-    @inline _ν_from_ρ(ρ::T) where {T} = exp(-ρ)           # ν = e^{-ρ} > 0
-    @inline _κ_from_ρ(ρ::T) where {T} = exp(ρ)            # κ = 1/ν
-    @inline _σ(x::T) where {T} = inv(one(T) + exp(-x))    # logistic
-    @inline _lse(a::T,b::T) where {T} = (m = max(a,b); m + log1p(exp(min(a,b)-m)))  # logsumexp
-
-    # --- log Z(λ,ν) ---
-    @inline function _logZ(λ::T, ν::T; Kmax::Int=50_000, rtol::T=oftype(λ, eps(Float64)*100)) where {T}
-        if !(λ > zero(T)) || !(ν > zero(T)); return zero(T) end
-        logλ = log(λ); logS = zero(T); k = 0
-        @inbounds while k < Kmax
-            k += 1
-            ak = T(k)*logλ - ν*loggamma(T(k) + one(T))
-            logS = (ak > logS) ? ak + log1p(exp(logS - ak)) : logS + log1p(exp(ak - logS))
-            if (ak - logS) < log(rtol); break; end
-        end
-        return logS
-    end
-
-    # --- single pass sums for CDF/quantile (CMP part) ---
-    @inline function _sumZ_and_partial(y::Int, λ::T, ν::T; Kmax::Int=1_000, tol::T=oftype(λ, eps(Float64)*100)) where {T}
-        s = one(T); term = one(T); k = 0; s_y = (y >= 0) ? one(T) : zero(T)
-        @inbounds while k < Kmax
-            k += 1
-            term *= λ * exp(-ν * log(float(k)))
-            s    += term
-            if k == y; s_y = s; end
-            if abs(term) ≤ max(tol, tol*abs(s)); break; end
-        end
-        return s, s_y
-    end
-
-    # --- cache loggamma(n+1) for integer counts ---
-    int_counts = eltype(c) <: Integer && all(x -> x ≥ 0, c)
-    lg_cache = if int_counts
-        maxy = maximum(c); v = Vector{Float64}(undef, maxy + 1)
-        @inbounds @simd for k in 1:length(v); v[k] = loggamma(k); end; v
-    else
-        Float64[]
-    end
-    @inline get_lg(n::Int) = int_counts ? @inbounds(lg_cache[n+1]) : loggamma(n+1)
-
-    # --- log-likelihood (ZI–CMP) ---
-    loglikelihood =
-        if isnothing(Θ₃_priors)
-            function (Θ::AbstractVector{T}) where {T}
-                Θ₁, Θ₂, ρ, ψ = Θ
-                ν = _ν_from_ρ(ρ)
-                s_local = zeros(T, Threads.nthreads())
-                if eltype(Θ) <: Real
-                    Threads.@threads for i in 1:N
-                        n   = c[i]; di = d[i]
-                        logλ = Θ₁ + Θ₂*di; λ = exp(logλ)
-                        logZ = _logZ(λ, ν)
-                        p = _σ(ψ)
-                        if n == 0
-                            s_local[Threads.threadid()] += _lse(log(p), log1p(-p) - logZ)
-                        else
-                            s_local[Threads.threadid()] += log1p(-p) + n*logλ - ν*get_lg(Int(n)) - logZ
-                        end
-                    end
-                    s = zero(T); @inbounds @simd for t in 1:length(s_local); s += s_local[t]; end
-                else
-                    s = zero(T)
-                    @inbounds @simd for i in 1:N
-                        n   = c[i]; di = d[i]
-                        logλ = Θ₁ + Θ₂*di; λ = exp(logλ)
-                        logZ = _logZ(λ, ν)
-                        p = _σ(ψ)
-                        if n == 0
-                            s += _lse(log(p), log1p(-p) - logZ)
-                        else
-                            s += log1p(-p) + n*logλ - ν*get_lg(Int(n)) - logZ
-                        end
-                    end
-                end
-                reg = (T(0.5)*T(δΘ₂⁻²))*(Θ₂ - T(Θ̄₂))^2
-                return -(s) + reg
-            end
-        else
-            μ, σ, νp = Θ₃_priors   # prior on log ν stays the same
-            function (Θ::AbstractVector{T}) where {T}
-                Θ₁, Θ₂, ρ, ψ = Θ
-                ν = _ν_from_ρ(ρ)
-                s_local = zeros(T, Threads.nthreads())
-                if eltype(Θ) <: Real
-                    Threads.@threads for i in 1:N
-                        n   = c[i]; di = d[i]
-                        logλ = Θ₁ + Θ₂*di; λ = exp(logλ)
-                        logZ = _logZ(λ, ν)
-                        p = _σ(ψ)
-                        if n == 0
-                            s_local[Threads.threadid()] += _lse(log(p), log1p(-p) - logZ)
-                        else
-                            s_local[Threads.threadid()] += log1p(-p) + n*logλ - ν*get_lg(Int(n)) - logZ
-                        end
-                    end
-                    s = zero(T); @inbounds @simd for t in 1:length(s_local); s += s_local[t]; end
-                else
-                    s = zero(T)
-                    @inbounds @simd for i in 1:N
-                        n   = c[i]; di = d[i]
-                        logλ = Θ₁ + Θ₂*di; λ = exp(logλ)
-                        logZ = _logZ(λ, ν)
-                        p = _σ(ψ)
-                        if n == 0
-                            s += _lse(log(p), log1p(-p) - logZ)
-                        else
-                            s += log1p(-p) + n*logλ - ν*get_lg(Int(n)) - logZ
-                        end
-                    end
-                end
-                reg  = (T(0.5)*T(δΘ₂⁻²))*(Θ₂ - T(Θ̄₂))^2
-                pen3 = (abs(log(ν) - T(μ))/T(σ))^T(νp)   # = (abs(-ρ - μ)/σ)^νp
-                return -(s) + reg + pen3
-            end
-        end
-
-    # --- initializer (ρ₀=0 ⇒ ν₀=1; ψ from zero fraction) ---
-    μ̄ = logmean(c)
-    zfrac = mean(c .== 0)
-    p0 = clamp(0.5*zfrac, 1e-6, 1 - 1e-6)   # mild zero-inflation start
-    ψ0 = log(p0/(1-p0))
-    Θ₀ = [log(μ̄), 1.0, 0.0, ψ0]
-
-    # --- residuals: ZI mean/var using CMP asymptotics used before -------------
-    residual = function (Θ::AbstractVector{T}) where {T}
-        Θ₁, Θ₂, ρ, ψ = Θ
-        ν    = _ν_from_ρ(ρ)
-        invν = _κ_from_ρ(ρ)   # = exp(ρ)
-        p    = _σ(ψ)
-        half = T(0.5)
-        out  = Vector{T}(undef, N)
-        if eltype(Θ) <: Real
-            Threads.@threads for i in 1:N
-                logλ = Θ₁ + Θ₂*d[i]
-                λν   = exp(logλ * invν)                  # CMP mean approx core
-                μcmp = λν + (inv(T(2)*ν) - half)
-                σ2cmp= max(invν * λν, oftype(logλ, eps(Float64)))
-                μzi  = (one(T) - p)*μcmp
-                σ2zi = (one(T) - p)*(σ2cmp + p*μcmp*μcmp)
-                z    = (c[i] - μzi) / sqrt(max(σ2zi, oftype(logλ, eps(Float64))))
-                @inbounds out[i] = ifelse(z < -T(5), -T(5), ifelse(z > T(5), T(5), z))
-            end
-        else
-            @inbounds @simd for i in 1:N
-                logλ = Θ₁ + Θ₂*d[i]
-                λν   = exp(logλ * invν)
-                μcmp = λν + (inv(T(2)*ν) - half)
-                σ2cmp= max(invν * λν, oftype(logλ, eps(Float64)))
-                μzi  = (one(T) - p)*μcmp
-                σ2zi = (one(T) - p)*(σ2cmp + p*μcmp*μcmp)
-                z    = (c[i] - μzi) / sqrt(max(σ2zi, oftype(logλ, eps(Float64))))
-                out[i] = ifelse(z < -T(5), -T(5), ifelse(z > T(5), T(5), z))
-            end
-        end
-        return out
-    end
-
-    # --- randomized normal scores (ZI-CMP) ------------------------------------
-    quantile = function (Θ)
-        Θ₁, Θ₂, ρ, ψ = Θ
-        ν = _ν_from_ρ(ρ)
-        p = _σ(ψ)
-        qv = Vector{Float64}(undef, N)
-        if eltype(Θ) <: Real
-            Threads.@threads for i in 1:N
-                y    = Int(c[i])
-                logλ = Θ₁ + Θ₂*d[i]; λ = exp(logλ)
-                S, S_yminus = _sumZ_and_partial(max(y-1, 0), λ, ν)
-                invZ = inv(S)
-                if y == 0
-                    mass0 = p + (1 - p) * invZ
-                    Fi = clamp(rand()*mass0, 1e-15, 1-1e-15)
-                else
-                    pycmp = exp(y*logλ - ν*get_lg(y)) * invZ
-                    Flo   = p + (1 - p) * (S_yminus * invZ)
-                    Fi    = clamp(Flo + rand()*((1 - p)*pycmp), 1e-15, 1-1e-15)
-                end
-                @inbounds qv[i] = sqrt(2) * erfinv(2*Fi - 1)
-            end
-        else
-            @inbounds for i in 1:N
-                y    = Int(c[i])
-                logλ = Θ₁ + Θ₂*d[i]; λ = exp(logλ)
-                S, S_yminus = _sumZ_and_partial(max(y-1, 0), λ, ν)
-                invZ = inv(S)
-                if y == 0
-                    mass0 = p + (1 - p) * invZ
-                    Fi = clamp(rand()*mass0, 1e-15, 1-1e-15)
-                else
-                    pycmp = exp(y*logλ - ν*get_lg(y)) * invZ
-                    Flo   = p + (1 - p) * (S_yminus * invZ)
-                    Fi    = clamp(Flo + rand()*((1 - p)*pycmp), 1e-15, 1-1e-15)
-                end
-                qv[i] = sqrt(2) * erfinv(2*Fi - 1)
-            end
-        end
-        clamp!(qv, -10.0, 10.0)
-        return qv
-    end
-
-    # --- CDF at observed counts (ZI-CMP) --------------------------------------
-    cumulative = function (Θ)
-        Θ₁, Θ₂, ρ, ψ = Θ
-        ν = _ν_from_ρ(ρ)
-        p = _σ(ψ)
-        cdf = Vector{Float64}(undef, N)
-        if eltype(Θ) <: Real
-            Threads.@threads for i in 1:N
-                y = Int(c[i]); λ = exp(Θ₁ + Θ₂*d[i])
-                S, S_y = _sumZ_and_partial(y, λ, ν)
-                @inbounds cdf[i] = p + (1 - p) * (S_y * inv(S))
-            end
-        else
-            @inbounds @simd for i in 1:N
-                y = Int(c[i]); λ = exp(Θ₁ + Θ₂*d[i])
-                S, S_y = _sumZ_and_partial(y, λ, ν)
-                cdf[i] = p + (1 - p) * (S_y * inv(S))
-            end
-        end
-        return cdf
-    end
-
-    return (
-        Θ₀         = Θ₀,
-        likelihood = TwiceDifferentiable(loglikelihood, Θ₀; autodiff=:forward),
-        constraint = TwiceDifferentiableConstraints([-∞,-∞,-∞,-∞],[+∞,+∞,+∞,+∞]),  # ρ, ψ unconstrained
-        residual   = residual,
-        quantile   = quantile,
-        cumulative = cumulative
-    )
-end
 
 function CMPoisson(count, depth; Θ̄₂=1, δΘ₂⁻²=0, Θ₃_priors=nothing) # This is log parameterization
     @assert length(count) == length(depth)
@@ -1877,8 +1409,6 @@ function glm(data; stochastic=negativebinomial, priors = nothing, ϵ=1, run=(x)-
 
 end
 
-using Statistics
-
 """
     conditional_variance_mixture(data, model; tol=1e-12, kmax=20_000)
 
@@ -2022,7 +1552,12 @@ function conditional_variance_mixture(data, model; tol=1e-12, kmax=20_000)
     return Σ
 end
 
-
+function zscore_matrix(X)
+    # X is (n_genes × n_cells)
+    X_centered = X .- mean(X, dims=2)  # center each gene (row)
+    X_std = X_centered ./ std(X_centered, dims=2)  # scale to variance 1
+    return X_std
+end
 
 
 """
@@ -2055,7 +1590,7 @@ function normalize(data, model; δ = 2)
         )
     end
 
-    F = svd(X̃₁)
+    F = svd(zscore_matrix(X̃₁))
     σ = F.S
     R = count(σ .> (√size(X̃₁,1) + √size(X̃₁,2)) + δ)
 
@@ -2070,6 +1605,7 @@ function normalize(data, model; δ = 2)
 
     return (
         testing_data    = (u², v², X̃₁, Σ̃),
+        pregamma        = scRNA.Count(X̃, data.gene, data.cell),
         counts          = scRNA.Count(X̂, data.gene, data.cell),
         rank            = R,
         corr            = ρ,

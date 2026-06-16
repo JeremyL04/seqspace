@@ -2,8 +2,8 @@ module SeqSpace
 
 using GZip
 using BSON: @save, @load
-using LinearAlgebra: norm, svd, Diagonal, dot, eigvals
-using Statistics: quantile, std
+using LinearAlgebra: norm, svd, Diagonal, dot, eigvals, tr
+using Statistics: quantile, std, var
 import Statistics
 using Flux, Zygote
 using ProgressMeter
@@ -90,6 +90,7 @@ mutable struct HyperParams
     γₓ :: Float32      # prefactor of distance soft rank loss
     γᵤ :: Float32      # prefactor of uniform density loss
     g  :: Function     # metric given to latent space
+    Ψ  :: Matrix{Float32}          # placeholder for future use #XXX Testing here
 end
 
 """
@@ -114,7 +115,7 @@ function cylinder²(x)
     return (c' .- c).^2 .+ (s' .- s).^2 .+ euclidean²(x[2:end,:])
 end
 
-HyperParams(; dₒ=2, Ws=Int[], BN=Int[], DO=Int[], N=200, δ=10, η=1e-3, λ = 0, B=64, V=1, k=12, γₓ=1, γᵤ=1e-1, g=euclidean²) = HyperParams(dₒ, Ws, BN, DO, N, δ, η, λ, B, V, k, γₓ, γᵤ, g)
+HyperParams(; dₒ=2, Ws=Int[], BN=Int[], DO=Int[], N=200, δ=10, η=1e-3, λ = 0, B=64, V=1, k=12, γₓ=1, γᵤ=1e-1, g=euclidean², Ψ = zeros(Float32, 2, 2)) = HyperParams(dₒ, Ws, BN, DO, N, δ, η, λ, B, V, k, γₓ, γᵤ, g, Ψ)
 
 """
     struct Result
@@ -180,17 +181,51 @@ mean(x::Matrix;dims=1) = sum(x;dims=dims) / size(x,dims)
 
 function cor(x, y)
     μ = (
-        x=mean(x),
-        y=mean(y)
+        x = mean(x),
+        y = mean(y)
     )
     var = (
-       x=mean(x.^2) .- μ.x^2,
-       y=mean(y.^2) .- μ.y^2
+        x = mean(x.^2) .- μ.x^2,
+        y = mean(y.^2) .- μ.y^2
     )
-
-    return (mean(x.*y) .- μ.x.*μ.y) / sqrt(var.x*var.y)
+    return (mean(x .* y) .- μ.x .* μ.y) / sqrt(var.x * var.y)
 end
 
+function procrustes_align(Z, Y)
+    # Align Z to Y using optimal rotation/scaling
+    # Returns aligned Z
+    Z_centered = Z .- Statistics.mean(Z, dims=2)
+    Y_centered = Y .- Statistics.mean(Y, dims=2)
+
+    H = Z_centered * Y_centered'
+    U, _, V = svd(H)
+    R = V * U'  # Optimal rotation
+    
+    # Scale
+    s = tr(Y_centered' * R * Z_centered) / tr(Z_centered * Z_centered')
+    
+    return s * R * Z_centered .+ Statistics.mean(Y, dims=2)
+end
+
+function uniform_loss(z::AbstractMatrix{T}; n_queries::Int=1000, area::Real=4) where {T<:AbstractFloat}
+    num_points = size(z, 2)
+
+    σ = sqrt(T(area) / T(num_points))
+    inv2σ2 = inv(T(2) * σ * σ)
+
+    # queries in [-1, 1]^2 (same as before, but typed to T)
+    q = T(2) .* rand(T, 2, n_queries) .- one(T)
+
+    # ||q - z||^2 = ||q||^2 + ||z||^2 - 2 q'z
+    q2 = sum(abs2, q; dims=1)          # 1 × n_queries
+    z2 = sum(abs2, z; dims=1)          # 1 × num_points
+    G  = transpose(q) * z              # n_queries × num_points (GEMM)
+
+    d2 = q2' .+ z2 .- T(2) .* G        # n_queries × num_points
+
+    ρ = vec(sum(exp.(-d2 .* inv2σ2), dims=2))  # n_queries
+    return Statistics.var(log.(ρ .+ T(1e-8)))
+end
 
 
 """
@@ -213,7 +248,8 @@ function buildloss(model, D², param)
 
     ϕ = collect(0:0.01:π) .- 0.001
     ICDF_Splines = approximate_functions(ϕ, 0:0.01:1)
-    Nₛ = 9
+    Nₛ = 20
+    I = rand(1:length(ϕ), Nₛ)
 
 
     return function(x, i::T, output::Bool) where T <: AbstractArray{Int,1}
@@ -241,56 +277,25 @@ function buildloss(model, D², param)
         
         if param.γᵤ == 0
             ϵᵤ = 0
-        else 
-            # Elipsoid penality
-            # a = 10
-            # b = 10
-            # c = 0.1
-            # ϵᵤ = sum(@. relu.(z[1,:]^2/a^2 + z[2,:]^2/b^2 + z[3,:]^2/c^2 - 1)^2)
+        else
+         
+            # XXX: Central Force Repulsion
+            # ϵᵤ = let
+            #     N = size(z, 2)
+            #     A = 1.0
+            #     d₀² = 0.25 * A / N
+            #     Dz² = SeqSpace.upper_tri(Dz²) .+ 1e-8
+                
+            #     harmonic = (Dz² .- d₀²).^2
+            #     repel = d₀² ./ Dz²  # blows up as Dz² → 0
+                
+            #     mean(harmonic .+ repel)
+            # end
 
-            # Voronoi/Dulaney
-
-            # True Voronoi
             ϵᵤ = let
-                N = size(z,2)
-                sum(abs.(voronoi_areas(z, boundary_points) .- (latent_area / Float32(N))))
-            end
-
-            # # Dulaney Triangles
-            # ϵᵤ = let
-            #     A = areas(z, boundary_points)
-            #     N_triangles = size(A,1)
-            #     sum(abs.(A .- (latent_area/N_triangles)))
-            # end
-
-            # # Central Force Repulsion
-                # ϵᵤ = let
-                #     α = 10 ./ sqrt(latent_area/size(z,2))
-                #     Dz = SeqSpace.upper_tri(Dz²)
-                #     mean(exp.(-α*Dz))
-                # end
-
-                #     ϵ = 16*log(10)/(sqrt(latent_area/3039)) # 15log(10) chosen so l/2 is cutoff at 10^-8
-                #     mean(20*exp.(-ϵ*Dz)) # Constant to speed up convergence
-
-                # end
-
-        # print("\r ϵᵣ = $ϵᵣ, ϵₓ = $ϵₓ, ϵᵤ = $ϵᵤ")
-    
-
-
-            # # Radon Slicing
-            # ϵᵤ = let
-            #     I = rand(1:length(ϕ), Nₛ)
-            #     Θ, ICDFs = ϕ[I], ICDF_Splines[I]
-            #     # z̃ = z
-            #     z̃ = ((2 * [1/Λ[1] 0; 0 1/Λ[2]]) * z) .- 1
-            #     ψₚ = [[dot(point, [cos(θ), sin(θ)]) for point ∈ eachcol(z̃)] for θ ∈ Θ]
-            #     Ranks = [softrank(ψ) for ψ ∈ ψₚ]
-            #     Y = [(r .- minimum(r)) ./ (1 .- minimum(r)) for r ∈ Ranks]
-            #     InvCDFs = [ICDFs[i].(Y[i]) for i ∈ eachindex(Θ)]
-            #     mean(mean.((F⁻¹ .- ψ).^4 for (F⁻¹, ψ) in zip(InvCDFs, ψₚ)))
-            # end
+                    N = size(z, 2)
+                    sum(sum(z.^2; dims=1)) / N
+                end
 
         end
 
@@ -384,11 +389,12 @@ function fitmodel(
             push!(E.train, loss(batch.train, index.train, false))
             push!(E.valid, loss(batch.valid, index.valid, false))
 
-            # if dev
-            #     push!(Info.𝕃ᵣ, data_loss(batch.train, index.train, false)[1])
-            #     push!(Info.𝕃ₓ, data_loss(batch.train, index.train, false)[2])
-            #     push!(Info.𝕃ᵤ, data_loss(batch.train, index.train, false)[3])
-            # end
+            if dev
+                Εᵣ, Εₓ, Εᵤ = loss_peices(batch.train, index.train, false)
+                push!(Info.𝕃ᵣ, Εᵣ)
+                push!(Info.𝕃ₓ, Εₓ)
+                push!(Info.𝕃ᵤ, Εᵤ)
+            end
         end
 
         if (n-1) % 10 == 0
@@ -530,6 +536,10 @@ function train_transfer_model(result, data, Epochs; D² = nothing, new_hyperpara
     Flux.testmode!(model)
 
     return Result(param, (train_hist, valid_hist), info_hist, model), (batch = batch, index = index)
+end
+
+function test_revise()
+    return "Working 2/27"
 end
 
 end

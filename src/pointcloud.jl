@@ -16,7 +16,8 @@ include("distance.jl")
 using .Distances
 
 export embed, upper_tri
-export neighborhood, geodesics, mds, isomap, scaling, geodesic_paths, avg_path_curvature
+export neighborhood, geodesics, mds, isomap, scaling, geodesic_paths, avg_path_curvature, farthest_point_sampling
+export adjacency_matrix
 
 # ------------------------------------------------------------------------
 # globals
@@ -212,6 +213,22 @@ function adjacency_list(G :: Graph)
     end
 
     return adj
+end
+
+"""
+    adjacency_matrix(G :: Graph)
+
+Return the binary N×N adjacency matrix for graph `G`, where entry (i,j) is 1 if an edge connects vertices i and j, and 0 otherwise.
+"""
+function adjacency_matrix(G :: Graph)
+    n = length(G.verts)
+    A = zeros(Int, n, n)
+    for e ∈ G.edges
+        v₁, v₂ = e.verts
+        A[v₁, v₂] = 1
+        A[v₂, v₁] = 1
+    end
+    return A
 end
 
 """
@@ -499,6 +516,37 @@ function isomap(x, dₒ; k=12, sparse=true)
     D = geodesics(G; sparse=sparse)
     return mds(D.^2, dₒ)
 end
+
+"""
+    farthest_point_sampling(D, K)
+
+Selects `K` points from the distance matrix `D` using the farthest point sampling algorithm.
+"""
+
+function farthest_point_sampling(D::AbstractMatrix{<:Real}, K::Int)
+    N, M = size(D)
+    @assert N == M "distance matrix must be square"
+    @assert K ≤ N "K must be ≤ number of points"
+
+    selected = Vector{Int}(undef, K)
+    selected[1] = rand(1:N)
+    min_dist = fill(Inf, N)
+
+    for i in 2:K
+        last = selected[i-1]
+        @inbounds for j in 1:N
+            d = D[j, last]
+            if d < min_dist[j]
+                min_dist[j] = d
+            end
+        end
+        selected[i] = argmax(min_dist)
+    end
+
+    return selected
+end
+
+
 
 # ------------------------------------------------------------------------
 # dimension estimation

@@ -85,7 +85,7 @@ end
 
 function iterate(it::LayerIterator, state)
     return if state.dropout
-               Dropout(0.35), (
+               Dropout(0.3), (
                    index     = state.index,
                    dropout   = false,
                    normalize = state.normalize,

@@ -75,10 +75,11 @@ function virtualembryo(;directory="/Users/jeremy/Desktop/Research/Positional Inf
     expression = expression[mask, :]
     genes      = genes[mask]
 
+    positions[positions[:,2] .< -1,2] .= -positions[positions[:,2] .< -1,2]
+
     return (
         expression = (
             real = expression,
-            data = hcat(fitmixture.(eachcol(expression))...), # TODO: Figure out what this does
             gene = genes,
         ),
         position  = positions,
@@ -111,19 +112,16 @@ end
 
 function match(x, y; exclude=nothing)
     dict = Dict(name => i for (i, name) in pairs(y))
-    common = [get(dict, g, nothing) for g in x]
+    common = Union{Int,Nothing}[get(dict, g, nothing) for g in x]
     if exclude !== nothing
-        nn = filter(!isnothing, common)
         for g in exclude
-            i = findfirst(==(nn[g]), common)
-            if i !== nothing
-                common[i] = nothing
+            if 1 <= g <= length(common)
+                common[g] = nothing
             end
         end
     end
     common
 end
-
 # function match(x, y)
 #     index = Array{String}(undef,length(x))
 #     for (g,i) in x
@@ -411,6 +409,65 @@ function inversion(counts, genes; ν=nothing, ω=nothing, refdb=nothing, exclude
     )
 end
 
+"""
+    ideal_mapping(normalized_scrna, bdtnp; betas=1:10:300, exclude_n=50)
+
+Find the ideal mapping from `normalized_scrna` to `bdtnp` by scanning over `betas` and excluding the worst `exclude_n` genes.
+Returns the optimal transport plan, the mapping object, the best beta, and a list of gene correlations.
+"""
+function ideal_mapping(normalized_scrna, bdtnp; betas=1:10:300, exclude_n=30)
+    eval_map = function(mapping, betas)
+        cmean = similar(collect(betas), Float64)
+        corrs = Vector{Vector{Float64}}(undef, length(betas))
+        gene_names = nothing  # Store gene names once
+        
+        for (j, β) in enumerate(betas)
+            Ψ = mapping.invert(β)
+            ψl = (Ψ ./ sum(Ψ, dims=1))'
+            ϕ = mapping.index
+            ι = findall(.!isnothing.(ϕ))
+            
+            # Get gene names (only need to do this once)
+            if isnothing(gene_names)
+                # Handle both array and dict formats
+                if bdtnp.expression.gene isa AbstractArray
+                    gene_names = bdtnp.expression.gene[ι]
+                elseif bdtnp.expression.gene isa Dict
+                    # Invert dict: index => gene_name
+                    idx_to_gene = Dict(v => k for (k, v) in bdtnp.expression.gene)
+                    gene_names = [idx_to_gene[i] for i in ι]
+                end
+            end
+            
+            ref = bdtnp.expression.real[ι, :]
+            qry = normalized_scrna.data[ϕ[ι], :] * ψl
+            corrs[j] = [cor(ref[i, :], qry[i, :]) for i in 1:size(ref, 1)]
+            cmean[j] = mean(corrs[j])
+            print("\r\e β = $β, correlation = $(cmean[j])")
+        end
+        println()
+        
+        I = argmax(cmean)
+        # Return named tuples pairing gene names with correlations
+        best_corr = [(gene=gene_names[i], correlation=corrs[I][i]) for i in 1:length(gene_names)]
+        (I=I, β=betas[I], best_corr=best_corr)
+    end
+    
+    # Pass 1: pick β and worst genes
+    map1 = inversion(normalized_scrna, normalized_scrna.gene; refdb=bdtnp)
+    res1 = eval_map(map1, betas)
+    bad = sortperm([x.correlation for x in res1.best_corr])[1:exclude_n]
+    
+    # Pass 2: exclude worst genes, re-pick β and ψ
+    map2 = inversion(normalized_scrna, normalized_scrna.gene; refdb=bdtnp, exclude=bad)
+    res2 = eval_map(map2, betas)
+    Ψ = map2.invert(res2.β)
+    
+    return Ψ, map2, res2.β, res2.best_corr
+end
+
+
+
 # basic statistics
 mean(x)  = sum(x) / length(x)
 cov(x,y) = mean(x.*y) .- mean(x)*mean(y)
@@ -496,8 +553,23 @@ function find_params(ref, qry)
     ) #, Method=:dxnes, NThreads=Threads.nthreads(), )
 end
 
+function compute_gene_quality(DATA, ψ, bdtnp, genes)
+    ϕ = match(bdtnp.expression.gene, genes)
+    ι = findall(.!isnothing.(ϕ))
+    
+    ref_genes = bdtnp.expression.real[ι,:]
+    qry_genes = DATA.data[ϕ[ι],:]
+    
+    qry_pred = qry_genes * ψ'
+    
+    # Gene-wise correlation
+    quality = [cor(ref_genes[i,:], qry_pred[i,:]) for i in 1:length(ι)]
+    
+    return quality, ι
+end
+
 function test_revise()
-    return "the test is still good"
+    return "the test is good"
 end
 
 end

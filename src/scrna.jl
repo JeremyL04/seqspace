@@ -3,6 +3,7 @@ module scRNA
 using GSL
 using Statistics, StatsBase, Distributions, NMF
 using SpecialFunctions
+using Makie
 
 import Base:
     size,
@@ -16,9 +17,10 @@ import LinearAlgebra:
 include("io.jl")
 include("mle.jl")
 include("util.jl")
-
+include("infer.jl")
 
 using .DataIO: read_mtx, read_barcodes, read_features, read_dge
+using .Inference: match
 
 export barcodes, genes, Count
 
@@ -137,7 +139,8 @@ ncells(seq::Count) = size(seq,2)
 +(seq::Count, x::Union{<:Number,<:AbstractMatrix}) = Count(seq.data+x, seq.gene, seq.cell)
 -(seq::Count, x::Union{<:Number,<:AbstractMatrix}) = Count(seq.data-x, seq.gene, seq.cell)
 
-*(seq::Count, x::Union{<:Number,<:AbstractMatrix}) = Count(seq.data*x, seq.gene, seq.cell)
+*(seq::Count, x::Number) = Count(seq.data*x, seq.gene, seq.cell)
+*(seq::Count, x::AbstractMatrix) = Count(seq.data*x, seq.gene, seq.cell)
 /(seq::Count, x::Number) = Count(seq.data/x, seq.gene, seq.cell)
 %(seq::Count, x::Number) = Count(seq.data%x, seq.gene, seq.cell)
 ^(seq::Count, x::Number) = Count(seq.data^x, seq.gene, seq.cell)
@@ -268,6 +271,61 @@ function load(dir::AbstractString; batch=missing)
     end
 end
 
+"""
+    filter_raw(raw; upper_cell_cut=0.9, lower_cell_cut=0.3, upper_gene_cut=0.1, lower_gene_cut=0.8, keep_bdtnp_genes = true, bdtnp = bdtnp)
+
+Pre-filters raw count matrix `raw` by removing low-quality cells and genes based upon mean expression quantiles.
+By default, cells with mean expression in the bottom 30% or top 10% are removed.
+Genes with mean expression in the bottom 80% or top 10% are also removed.
+If `keep_bdtnp_genes` is true, genes present in the BDTNP dataset are retained regardless of expression level.
+Returns the filtered count matrix.
+"""
+function filter_raw(raw; upper_cell_cut=0.9, lower_cell_cut=0.3, upper_gene_cut=0.1, lower_gene_cut=0.8, keep_bdtnp_genes = true, bdtnp = bdtnp)
+
+    # ----- Obvious pre-filtering -----
+    raw = raw[[any(row .> 1) for row in eachrow(raw)], [any(col .> 1) for col in eachcol(raw)]] # Filter genes/cells that are all zeros
+
+    cell_lower_cut = quantile(mean.(eachcol(raw)), lower_cell_cut)
+    cell_upper_cut = quantile(mean.(eachcol(raw)), 1 - upper_cell_cut)
+    raw = raw[:, (mean.(eachcol(raw)) .> cell_lower_cut) .* (mean.(eachcol(raw)) .< cell_upper_cut)]
+
+    gene_upper_cut = quantile(mean.(eachrow(raw)), 1 - upper_gene_cut)
+    gene_lower_cut = quantile(mean.(eachrow(raw)), lower_gene_cut)
+
+    if keep_bdtnp_genes
+        bdtnp_genes = Inference.match(raw.gene, bdtnp.expression.gene) .!== nothing
+        gene_cut = ((mean.(eachrow(raw)) .< gene_upper_cut) .* (mean.(eachrow(raw)) .> gene_lower_cut)) .| bdtnp_genes
+    else
+        gene_cut = (mean.(eachrow(raw)) .> gene_lower_cut) .* (mean.(eachrow(raw)) .< gene_upper_cut)
+    end
+
+
+    raw = raw[gene_cut, :]
+    println("After filtering, there are $(size(raw,1)) genes and $(size(raw,2)) cells.")
+    return raw
+end
+
+"""
+    check_ecdf(raw)
+
+Plot empirical cumulative distribution functions (ECDF) of mean counts per cell and per gene for count matrix `raw`.
+"""
+function check_ecdf(raw)
+    cell_means = mean.(eachcol(raw))
+    gene_means = mean.(eachrow(raw))
+
+    fig = Figure(size = (800, 400))
+    ax1 = Axis(fig[1, 1], xlabel = "Mean counts per cell", ylabel = "ECDF", title = "Cells")
+    ax2 = Axis(fig[1, 2], xlabel = "Mean counts per gene", ylabel = "ECDF", title = "Genes")
+
+    ecdf_cells = sort(cell_means)
+    ecdf_genes = sort(gene_means)
+
+    lines!(ax1, ecdf_cells, (1:length(ecdf_cells)) ./ length(ecdf_cells), color = :blue)
+    lines!(ax2, ecdf_genes, (1:length(ecdf_genes)) ./ length(ecdf_genes), color = :red)
+
+    display(fig)
+end
 
 matchperm(a, b) = findfirst.(isequal.(a), (b,))
 
@@ -279,32 +337,64 @@ Reorders rows of `seq₂` to match gene names of `seq₁`.
 Additional genes in `seq₂` not contained in `seq₁` are added as augmented rows.
 """
 function ∪(seq₁::Count{T}, seq₂::Count{S}) where {T <: Real, S <: Real}
-    T₀ = T ≠ S ? promote_rule(T,S) : T
-    matches = matchperm(genes(seq₂), genes(seq₁)) # match 2 -> 1
-
-    newgenes = [gene for (gene,match) ∈ zip(genes(seq₂),matches) if isnothing(match) ]
-    features = [genes(seq₁) ; newgenes]
-    barcodes = [cells(seq₁) ; cells(seq₂)]
-
-    n = 1
+    T₀ = T ≠ S ? promote_type(T,S) : T
+    
+    matches = matchperm(genes(seq₂), genes(seq₁))
+    newgenes = [gene for (gene,match) ∈ zip(genes(seq₂), matches) if isnothing(match)]
+    
+    features = [genes(seq₁); newgenes]
+    barcodes = [cells(seq₁); cells(seq₂)]
+    
+    # Create fixed index mapping
     δ = ngenes(seq₁)
-    for (i,m) ∈ enumerate(matches)
+    new_idx = δ + 1
+    matches_fixed = map(matches) do m
         if isnothing(m)
-            matches[i] = n + δ
-            n += 1
+            idx = new_idx
+            new_idx += 1
+            return idx
+        else
+            return m
         end
-    end
-
-    data = [hcat(seq₁.data, zeros(T₀,ngenes(seq₁),ncells(seq₂)));
-            zeros(T₀,length(newgenes),ncells(seq₁)+ncells(seq₂))]
-
-    δ = ncells(seq₁)
+    end::Vector{Int}
+    
+    # Build data matrix
+    data = zeros(T₀, length(features), ncells(seq₁) + ncells(seq₂))
+    data[1:ngenes(seq₁), 1:ncells(seq₁)] = seq₁.data
+    
     for i ∈ 1:ncells(seq₂)
-        data[matches,i+δ] = seq₂[:,i]
+        data[matches_fixed, ncells(seq₁) + i] = seq₂[:, i]
     end
-
-    return Count(data,features,barcodes)
+    
+    return Count(data, features, barcodes)
 end
+
+"""
+    concatenate_genes(seq₁::Count{T}, seq₂::Count{S}) where {T <: Real, S <: Real}
+
+Concatenate count matrix `seq₁` and `seq₂` by stacking genes (rows).
+Requires that both datasets have the same number of cells.
+Used for synthetic data.
+"""
+function concatenate_genes(seq₁::Count{T}, seq₂::Count{S}) where {T <: Real, S <: Real}
+    # Check same number of cells
+    @assert ncells(seq₁) == ncells(seq₂) "Datasets must have the same number of cells: $(ncells(seq₁)) vs $(ncells(seq₂))"
+    
+    T₀ = promote_type(T, S)
+    
+    # Concatenate genes (vertical stack)
+    features = [genes(seq₁); genes(seq₂)]
+    barcodes = cells(seq₁)  # Keep barcodes from first dataset
+    
+    # Stack data matrices vertically
+    data = vcat(
+        convert(Matrix{T₀}, seq₁.data),
+        convert(Matrix{T₀}, seq₂.data)
+    )
+    
+    return Count(data, features, barcodes)
+end
+
 
 # NOTE: different merging strategy
 #       only common genes (intersection) are kept
@@ -479,7 +569,7 @@ function generate(ngene, ncell; ρ=(α=Gamma(0.25,2), β=Normal(1,.01), γ=Gamma
 end
 
 function TestReviseSCRNA()
-    return println("TestReviseSCRNA 5:42")
+    return println("TestReviseSCRNA 5:48")
 end
 
 end
